@@ -60,8 +60,8 @@ public sealed class Plugin : IDalamudPlugin
 
     private static readonly TreasureMapOption[] TreasureMapOptions =
     [
-        new("陈旧的狞豹革地图", "狩豹革制的宝物地图", LeopardTreasureMapItemId, LeopardTaskTreasureMapItemId),
         new("陈旧的卡冈图亚革地图", "卡冈图亚草制的宝物地图", GagantuaTreasureMapItemId, GagantuaTaskTreasureMapItemId),
+        new("陈旧的狞豹革地图（占位用未适配）", "狩豹革制的宝物地图", LeopardTreasureMapItemId, LeopardTaskTreasureMapItemId),
     ];
 
     private const string VnavmeshInternalName = "vnavmesh";
