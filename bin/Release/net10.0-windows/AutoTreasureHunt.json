@@ -1,0 +1,14 @@
+{
+  "Author": "Cino",
+  "Name": "挖宝助手",
+  "InternalName": "AutoTreasureHunt",
+  "AssemblyVersion": "1.0.2",
+  "Punchline": "监控挖宝所需插件并提供自动挖宝功能。",
+  "Description": "挖宝助手",
+  "ApplicableVersion": "any",
+  "DalamudApiLevel": 15,
+  "LoadPriority": 0,
+  "LoadRequiredState": 0,
+  "LoadSync": false,
+  "CanUnloadAsync": false
+}

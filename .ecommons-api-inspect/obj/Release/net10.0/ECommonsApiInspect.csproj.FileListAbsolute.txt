@@ -1,0 +1,14 @@
+C:\Users\admin\Desktop\ACR\自动挖宝\.ecommons-api-inspect\bin\Release\net10.0\ECommonsApiInspect.exe
+C:\Users\admin\Desktop\ACR\自动挖宝\.ecommons-api-inspect\bin\Release\net10.0\ECommonsApiInspect.deps.json
+C:\Users\admin\Desktop\ACR\自动挖宝\.ecommons-api-inspect\bin\Release\net10.0\ECommonsApiInspect.runtimeconfig.json
+C:\Users\admin\Desktop\ACR\自动挖宝\.ecommons-api-inspect\bin\Release\net10.0\ECommonsApiInspect.dll
+C:\Users\admin\Desktop\ACR\自动挖宝\.ecommons-api-inspect\bin\Release\net10.0\ECommonsApiInspect.pdb
+C:\Users\admin\Desktop\ACR\自动挖宝\.ecommons-api-inspect\obj\Release\net10.0\ECommonsApiInspect.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\admin\Desktop\ACR\自动挖宝\.ecommons-api-inspect\obj\Release\net10.0\ECommonsApiInspect.AssemblyInfoInputs.cache
+C:\Users\admin\Desktop\ACR\自动挖宝\.ecommons-api-inspect\obj\Release\net10.0\ECommonsApiInspect.AssemblyInfo.cs
+C:\Users\admin\Desktop\ACR\自动挖宝\.ecommons-api-inspect\obj\Release\net10.0\ECommonsApiInspect.csproj.CoreCompileInputs.cache
+C:\Users\admin\Desktop\ACR\自动挖宝\.ecommons-api-inspect\obj\Release\net10.0\ECommonsApiInspect.dll
+C:\Users\admin\Desktop\ACR\自动挖宝\.ecommons-api-inspect\obj\Release\net10.0\refint\ECommonsApiInspect.dll
+C:\Users\admin\Desktop\ACR\自动挖宝\.ecommons-api-inspect\obj\Release\net10.0\ECommonsApiInspect.pdb
+C:\Users\admin\Desktop\ACR\自动挖宝\.ecommons-api-inspect\obj\Release\net10.0\ECommonsApiInspect.genruntimeconfig.cache
+C:\Users\admin\Desktop\ACR\自动挖宝\.ecommons-api-inspect\obj\Release\net10.0\ref\ECommonsApiInspect.dll
