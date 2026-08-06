@@ -77,6 +77,7 @@ public sealed class Plugin : IDalamudPlugin
     private const uint DismountGeneralActionId = 23;
     private const uint DigGeneralActionId = 20;
     private const uint RouletteMapId = 1059;
+    private const uint OptimizedInteractionMapId = 12;
     private const uint RouletteDreamBaseId = 2014790;
     private const uint RouletteExitBaseId = 2000139;
     private const float RouletteInteractionDistance = 2f;
@@ -204,6 +205,7 @@ public sealed class Plugin : IDalamudPlugin
     private int dismountUseAttemptCount;
     private DateTime wheelTeleportAcceptAt;
     private bool wheelTeleportAcceptSubmitted;
+    private bool wheelWasInCombat;
     private MapLinkPayload? wheelPendingMapLink;
     private MapLinkPayload? wheelLastMapLink;
     private bool wheelAwaitingMapChangeAndFlag;
@@ -446,6 +448,7 @@ public sealed class Plugin : IDalamudPlugin
             }
             else
             {
+                wheelWasInCombat = false;
                 ResetWheelTeleportAcceptance();
                 ResetWheelMapLinkPending();
                 AutoTreasureHuntStatus = "车轮逻辑已开启，正在等待传送请求。";
@@ -460,6 +463,7 @@ public sealed class Plugin : IDalamudPlugin
 
             commandManager.ProcessCommand("/vnav stop");
             commandManager.ProcessCommand("/bmrai off");
+            wheelWasInCombat = false;
             CloseWorkflowBlockingWindows();
             if (automaticMapSupplementRunning)
             {
@@ -1088,6 +1092,7 @@ public sealed class Plugin : IDalamudPlugin
         marketSubmittedListingIds.Clear();
         ResetWheelTeleportAcceptance();
         ResetWheelMapLinkPending();
+        wheelWasInCombat = false;
 
         treasureChestPending = false;
         treasureChestEntityId = 0;
@@ -1667,7 +1672,6 @@ public sealed class Plugin : IDalamudPlugin
         marketBoardInteractionAttempted = false;
         marketBoardPositionSampleValid = false;
         automaticMapSupplementRunning = true;
-        LoadOptimizedInteraction();
         mapSupplementStage = MapSupplementStage.TravelingToBoard;
         mapSupplementPurchaseStep = 1;
         mapSupplementResumeAutoHunt = resumeAutoHunt;
@@ -1885,7 +1889,6 @@ public sealed class Plugin : IDalamudPlugin
     {
         var resumeAutoHunt = mapSupplementResumeAutoHunt;
         CloseMarketBoardWindows();
-        UnloadOptimizedInteraction();
         automaticMapSupplementRunning = false;
         automaticMapSupplementTriggered = false;
         mapSupplementStage = MapSupplementStage.None;
@@ -1911,7 +1914,6 @@ public sealed class Plugin : IDalamudPlugin
     private void FailMapSupplement(string reason)
     {
         CloseMarketBoardWindows();
-        UnloadOptimizedInteraction();
         automaticMapSupplementRunning = false;
         automaticMapSupplementTriggered = false;
         mapSupplementStage = MapSupplementStage.None;
@@ -2503,6 +2505,7 @@ public sealed class Plugin : IDalamudPlugin
 
         if (IsWheelLogicSelected)
         {
+            TryHandleWheelCombatState();
             if (TryHandleMovementWatchdog())
             {
                 return;
@@ -2594,6 +2597,23 @@ public sealed class Plugin : IDalamudPlugin
         TryDismountAtFlag();
         TryHandleTreasureChest();
         TryHandleTreasurePortal();
+    }
+
+    private void TryHandleWheelCombatState()
+    {
+        var inCombat = condition[ConditionFlag.InCombat];
+        if (inCombat && !wheelWasInCombat)
+        {
+            commandManager.ProcessCommand("/bmrai on");
+            AutoTreasureHuntStatus = "车轮：进入战斗，已执行 /bmrai on。";
+        }
+        else if (!inCombat && wheelWasInCombat)
+        {
+            commandManager.ProcessCommand("/bmrai off");
+            AutoTreasureHuntStatus = "车轮：脱离战斗，已执行 /bmrai off。";
+        }
+
+        wheelWasInCombat = inCombat;
     }
 
     private void OnChatMessage(IChatMessage message)
@@ -2754,6 +2774,19 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        if (currentMapId == OptimizedInteractionMapId || currentMapId == RouletteMapId)
+        {
+            wheelAwaitingMapChangeAndFlag = false;
+            wheelTeleportSourceMapId = 0;
+            mountAfterTeleportPending = false;
+            mountRetryQueued = false;
+            dismountAtFlagPending = false;
+            navigationPositionSampleValid = false;
+            navigationMovementObserved = false;
+            AutoTreasureHuntStatus = $"车轮：已获取地图 {currentMapId} 的新红旗，该地图不执行寻路。";
+            return;
+        }
+
         wheelAwaitingMapChangeAndFlag = false;
         wheelTeleportSourceMapId = 0;
         mountAfterTeleportPending = true;
@@ -2768,16 +2801,18 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnMapIdChanged(uint mapId)
     {
-        if (!IsHeadLogicSelected ||
-            !IsCredentialValidated ||
-            emergencyStopActive ||
-            !IsAutoTreasureHuntEnabled)
-        {
-            return;
-        }
-
         _ = framework.RunOnFrameworkThread(() =>
         {
+            UpdateOptimizedInteractionForMap(mapId);
+
+            if (!IsHeadLogicSelected ||
+                !IsCredentialValidated ||
+                emergencyStopActive ||
+                !IsAutoTreasureHuntEnabled)
+            {
+                return;
+            }
+
             if (mapId == RouletteMapId || clientState.MapId == RouletteMapId)
             {
                 EnterRouletteMode();
@@ -2793,6 +2828,8 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnZoneInit(ZoneInitEventArgs eventArgs)
     {
+        UpdateOptimizedInteractionForMap(clientState.MapId);
+
         if (!IsHeadLogicSelected || !IsCredentialValidated || !IsAutoTreasureHuntEnabled)
         {
             return;
@@ -2830,6 +2867,21 @@ public sealed class Plugin : IDalamudPlugin
 
         TeleportTestStatus = $"卫月已收到区域初始化事件（区域 {eventArgs.TerritoryType.RowId}），等待切区完成后使用随机坐骑。";
         ScheduleMountRouletteRetry();
+    }
+
+    private void UpdateOptimizedInteractionForMap(uint mapId)
+    {
+        if (IsHeadLogicSelected &&
+            IsCredentialValidated &&
+            !emergencyStopActive &&
+            IsAutoTreasureHuntEnabled &&
+            mapId == OptimizedInteractionMapId)
+        {
+            LoadOptimizedInteraction();
+            return;
+        }
+
+        UnloadOptimizedInteraction();
     }
 
     private unsafe void TrySelectPendingMap()
