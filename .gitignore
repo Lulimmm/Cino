@@ -1,0 +1,10 @@
+.vs/
+bin/
+obj/
+dist/
+*.user
+*.suo
+.dalamud-faq.html
+advanced-publishing.html
+custom-repositories.html
+plugin_publishing_.html

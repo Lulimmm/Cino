@@ -294,7 +294,6 @@ public sealed class Plugin : IDalamudPlugin
         this.commandManager = commandManager;
         this.objectTable = objectTable;
         this.targetManager = targetManager;
-        ECommons.ECommonsMain.Init(pluginInterface, this);
         configuration = pluginInterface.GetPluginConfig() as PluginConfiguration ?? new PluginConfiguration();
         if (!Enum.IsDefined(configuration.LogicMode))
         {
@@ -302,10 +301,6 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         ValidateSavedCredential();
-        IsVnavmeshRunning = CheckVnavmeshRunning();
-        IsGlobetrotterRunning = CheckGlobetrotterRunning();
-        IsBossModRebornRunning = CheckBossModRebornRunning();
-        RefreshTreasureMapCounts();
         mainWindow = new MainWindow(this, this.pluginInterface);
         this.gameInventory.InventoryChanged += OnInventoryChanged;
         this.chatGui.ChatMessage += OnChatMessage;
@@ -315,6 +310,17 @@ public sealed class Plugin : IDalamudPlugin
         this.pluginInterface.ActivePluginsChanged += OnActivePluginsChanged;
         this.pluginInterface.UiBuilder.Draw += mainWindow.Draw;
         this.pluginInterface.UiBuilder.OpenMainUi += mainWindow.Open;
+        _ = this.framework.RunOnTick(
+            InitializeRuntimeState,
+            delay: TimeSpan.FromSeconds(1));
+    }
+
+    private void InitializeRuntimeState()
+    {
+        IsVnavmeshRunning = CheckVnavmeshRunning();
+        IsGlobetrotterRunning = CheckGlobetrotterRunning();
+        IsBossModRebornRunning = CheckBossModRebornRunning();
+        RefreshTreasureMapCounts();
     }
 
     public bool IsVnavmeshRunning { get; private set; }
@@ -415,7 +421,6 @@ public sealed class Plugin : IDalamudPlugin
         clientState.ZoneInit -= OnZoneInit;
         gameInventory.InventoryChanged -= OnInventoryChanged;
         chatGui.ChatMessage -= OnChatMessage;
-        ECommons.ECommonsMain.Dispose();
     }
 
     public void SetAutoTreasureHuntEnabled(bool enabled)
@@ -4199,7 +4204,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private bool TrySendPartyFlag()
     {
-        ECommons.Automation.Chat.Instance.SendMessage("/p <flag>");
+        commandManager.ProcessCommand("/p <flag>");
         return true;
     }
 
