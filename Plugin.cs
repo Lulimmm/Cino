@@ -17,6 +17,7 @@ using FFXIVClientStructs.FFXIV.Component.GUI;
 using Dalamud.Game.Text.SeStringHandling.Payloads;
 using System.Security.Cryptography;
 using System.Text;
+using GameUtf8String = FFXIVClientStructs.FFXIV.Client.System.String.Utf8String;
 using LuminaAetheryte = Lumina.Excel.Sheets.Aetheryte;
 using LuminaMap = Lumina.Excel.Sheets.Map;
 using LuminaMapMarker = Lumina.Excel.Sheets.MapMarker;
@@ -4202,10 +4203,29 @@ public sealed class Plugin : IDalamudPlugin
             : $"{prefix}：游戏聊天组件暂不可用，已记录该红旗避免重复刷屏。";
     }
 
-    private bool TrySendPartyFlag()
+    private unsafe bool TrySendPartyFlag()
     {
-        commandManager.ProcessCommand("/p <flag>");
-        return true;
+        var uiModule = UIModule.Instance();
+        if (uiModule == null)
+        {
+            return false;
+        }
+
+        var message = GameUtf8String.FromSequence(Encoding.UTF8.GetBytes("/p <flag>"));
+        if (message == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            uiModule->ProcessChatBoxEntry(message);
+            return true;
+        }
+        finally
+        {
+            message->Dtor(free: true);
+        }
     }
 
     private bool TryRequestAutomaticTreasureMap()
