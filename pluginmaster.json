@@ -3,7 +3,7 @@
     "Author": "Cino",
     "Name": "自动挖宝",
     "InternalName": "AutoTreasureHunt",
-    "AssemblyVersion": "1.0.3.1",
+    "AssemblyVersion": "1.0.3.2",
     "TestingAssemblyVersion": null,
     "Description": "自动处理藏宝图、补图、传送和寻路流程。",
     "Punchline": "自动挖宝助手",
@@ -12,10 +12,10 @@
     "IsHide": false,
     "IsTestingExclusive": false,
     "RepoUrl": "https://github.com/Lulimmm/Cino",
-    "IconUrl": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/icon.png",
-    "DownloadLinkInstall": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/AutoTreasureHunt-1.0.3.1.zip",
-    "DownloadLinkTesting": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/AutoTreasureHunt-1.0.3.1.zip",
-    "DownloadLinkUpdate": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/AutoTreasureHunt-1.0.3.1.zip",
-    "LastUpdate": "1785996000"
+    "IconUrl": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/icon-v1.png",
+    "DownloadLinkInstall": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/AutoTreasureHunt-1.0.3.2.zip",
+    "DownloadLinkTesting": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/AutoTreasureHunt-1.0.3.2.zip",
+    "DownloadLinkUpdate": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/AutoTreasureHunt-1.0.3.2.zip",
+    "LastUpdate": "1786025400"
   }
 ]

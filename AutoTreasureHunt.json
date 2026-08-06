@@ -4,7 +4,7 @@
   "Punchline": "自动挖宝助手",
   "Description": "自动处理藏宝图、补图、传送和寻路流程。",
   "InternalName": "AutoTreasureHunt",
-  "AssemblyVersion": "1.0.3.1",
+  "AssemblyVersion": "1.0.3.2",
   "ApplicableVersion": "any",
   "Tags": [
     "treasure",
@@ -12,7 +12,7 @@
     "navigation"
   ],
   "RepoUrl": "https://github.com/Lulimmm/Cino",
-  "IconUrl": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/icon.png",
+  "IconUrl": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/icon-v1.png",
   "DalamudApiLevel": 15,
   "LoadRequiredState": 0,
   "LoadSync": false,
