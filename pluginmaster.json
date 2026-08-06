@@ -12,9 +12,10 @@
     "IsHide": false,
     "IsTestingExclusive": false,
     "RepoUrl": "https://github.com/Lulimmm/Cino",
+    "IconUrl": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/icon.png",
     "DownloadLinkInstall": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/AutoTreasureHunt-1.0.3.1.zip",
     "DownloadLinkTesting": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/AutoTreasureHunt-1.0.3.1.zip",
     "DownloadLinkUpdate": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/AutoTreasureHunt-1.0.3.1.zip",
-    "LastUpdate": "1785992400"
+    "LastUpdate": "1785996000"
   }
 ]

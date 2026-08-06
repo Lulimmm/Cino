@@ -12,6 +12,7 @@
     "navigation"
   ],
   "RepoUrl": "https://github.com/Lulimmm/Cino",
+  "IconUrl": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/icon.png",
   "DalamudApiLevel": 15,
   "LoadRequiredState": 0,
   "LoadSync": false,
