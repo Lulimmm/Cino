@@ -64,6 +64,9 @@ public sealed class Plugin : IDalamudPlugin
     private const uint OptimizedInteractionMapId = 12;
     private const uint RouletteExitBaseId = 2000139;
     private const float RouletteInteractionDistance = 2f;
+    private const float FlagNavigationMeaningfulProgressDistance = 1.5f;
+    private static readonly TimeSpan FlagNavigationJitterTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan FlagNavigationMaximumDuration = TimeSpan.FromSeconds(75);
     private const uint LimsaLowerDecksTerritoryId = 129;
     private const uint MarketBoardBaseId = 2000402;
     private static readonly TimeSpan MarketPurchaseActionDelay = TimeSpan.FromSeconds(1);
@@ -128,6 +131,11 @@ public sealed class Plugin : IDalamudPlugin
     private float navigationSampleY;
     private float navigationSampleZ;
     private DateTime navigationPositionStableSince;
+    private float navigationProgressAnchorX;
+    private float navigationProgressAnchorY;
+    private float navigationProgressAnchorZ;
+    private DateTime navigationLastMeaningfulProgressAt;
+    private DateTime navigationStartedAt;
     private bool treasureChestPending;
     private ulong treasureChestEntityId;
     private bool chestPositionSampleValid;
@@ -4857,13 +4865,19 @@ public sealed class Plugin : IDalamudPlugin
 
         const float movementTolerance = 0.05f;
         var currentPosition = localPlayer.Position;
+        var now = DateTime.UtcNow;
         if (!navigationPositionSampleValid)
         {
             navigationPositionSampleValid = true;
             navigationSampleX = currentPosition.X;
             navigationSampleY = currentPosition.Y;
             navigationSampleZ = currentPosition.Z;
-            navigationPositionStableSince = DateTime.UtcNow;
+            navigationPositionStableSince = now;
+            navigationProgressAnchorX = currentPosition.X;
+            navigationProgressAnchorY = currentPosition.Y;
+            navigationProgressAnchorZ = currentPosition.Z;
+            navigationLastMeaningfulProgressAt = now;
+            navigationStartedAt = now;
             AutoTreasureHuntStatus = "正在等待 vnavmesh 开始移动角色。";
             return;
         }
@@ -4876,7 +4890,32 @@ public sealed class Plugin : IDalamudPlugin
             navigationSampleX = currentPosition.X;
             navigationSampleY = currentPosition.Y;
             navigationSampleZ = currentPosition.Z;
-            navigationPositionStableSince = DateTime.UtcNow;
+            navigationPositionStableSince = now;
+
+            var progressX = currentPosition.X - navigationProgressAnchorX;
+            var progressY = currentPosition.Y - navigationProgressAnchorY;
+            var progressZ = currentPosition.Z - navigationProgressAnchorZ;
+            if (progressX * progressX + progressY * progressY + progressZ * progressZ >=
+                FlagNavigationMeaningfulProgressDistance * FlagNavigationMeaningfulProgressDistance)
+            {
+                navigationProgressAnchorX = currentPosition.X;
+                navigationProgressAnchorY = currentPosition.Y;
+                navigationProgressAnchorZ = currentPosition.Z;
+                navigationLastMeaningfulProgressAt = now;
+            }
+
+            if (now - navigationLastMeaningfulProgressAt >= FlagNavigationJitterTimeout)
+            {
+                FinishFlagNavigationAndDismount("红旗寻路在小范围内持续移动 5 秒未取得有效进展，已停止 /vnav 并尝试跳下。");
+                return;
+            }
+
+            if (now - navigationStartedAt >= FlagNavigationMaximumDuration)
+            {
+                FinishFlagNavigationAndDismount("红旗寻路超过 75 秒仍未结束，已停止 /vnav 并尝试跳下。");
+                return;
+            }
+
             AutoTreasureHuntStatus = "vnavmesh 正在移动角色，等待 X/Y/Z 坐标停止变化。";
             return;
         }
@@ -4887,18 +4926,30 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (DateTime.UtcNow - navigationPositionStableSince < TimeSpan.FromSeconds(1))
+        if (now - navigationPositionStableSince < TimeSpan.FromSeconds(1))
         {
             AutoTreasureHuntStatus = "角色 X/Y/Z 坐标已停止变化，正在确认稳定。";
             return;
         }
 
+        FinishFlagNavigationAndDismount("角色已到达红旗附近，已停止 /vnav，正在使用跳下。");
+    }
+
+    private void FinishFlagNavigationAndDismount(string status)
+    {
+        commandManager.ProcessCommand("/vnav stop");
         dismountAtFlagPending = false;
         dismountReadyAttemptCount = 0;
         dismountUseAttemptCount = 0;
-        TeleportTestStatus = "角色 X/Y/Z 坐标已稳定，正在使用跳下。";
+        navigationPositionSampleValid = false;
+        navigationMovementObserved = false;
+        navigationLastMeaningfulProgressAt = default;
+        navigationStartedAt = default;
+        TeleportTestStatus = status;
         AutoTreasureHuntStatus = TeleportTestStatus;
-        UseDismountAfterArrivalOnFrameworkThread();
+        _ = framework.RunOnTick(
+            UseDismountAfterArrivalOnFrameworkThread,
+            delay: TimeSpan.FromMilliseconds(250));
     }
 
     private unsafe void UseDismountAfterArrivalOnFrameworkThread()
