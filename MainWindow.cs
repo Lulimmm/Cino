@@ -206,12 +206,10 @@ public sealed class MainWindow
         if (!plugin.IsHeadLogicSelected)
         {
             ImGui.TextWrapped("当前选择车轮逻辑。可在此测试聊天地图链接获取红旗；车头测试功能已关闭。");
-            ImGui.BeginDisabled(!plugin.IsAutoTreasureHuntEnabled);
             if (ImGui.Button("测试获取聊天地图红旗"))
             {
                 plugin.TestWheelMapLink();
             }
-            ImGui.EndDisabled();
 
             ImGui.TextWrapped(plugin.WheelMapLinkStatus);
             return;

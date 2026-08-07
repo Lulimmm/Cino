@@ -247,6 +247,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly HashSet<ulong> rouletteInteractedChestEntities = [];
     private DateTime rouletteChestDisappearDeadline;
     private bool marketBoardAfterTeleportPending;
+    private bool marketBoardTeleportRetryQueued;
     private bool marketBoardInteractionPending;
     private bool marketBoardInteractionAttempted;
     private DateTime marketBoardInteractionRetryAt;
@@ -258,6 +259,9 @@ public sealed class Plugin : IDalamudPlugin
     private MarketPurchaseStage marketPurchaseStage;
     private DateTime marketPurchaseDeadline;
     private DateTime marketSearchRunAt;
+    private DateTime marketPricePageWaitSince;
+    private DateTime marketPricePageReadySince;
+    private int marketPricePageRetryCount;
     private uint marketPurchaseItemId;
     private string marketPurchaseItemName = string.Empty;
     private int marketPurchaseInitialMainCount;
@@ -275,6 +279,7 @@ public sealed class Plugin : IDalamudPlugin
     private bool mapSupplementResumeAutoHunt;
     private bool optimizedInteractionLoaded;
     private bool emergencyStopActive;
+    private bool manualTestModeActive;
     private string workflowWatchdogState = string.Empty;
     private DateTime workflowWatchdogStateSince;
     private DateTime workflowWatchdogCooldownUntil;
@@ -388,6 +393,8 @@ public sealed class Plugin : IDalamudPlugin
     public string SaddlebagMoveStatus { get; private set; } = "尚未测试取出鞍囊地图。";
 
     public bool IsAutoMapSupplementEnabled => configuration.AutoMapSupplementEnabled;
+
+    private bool CanRunAutomationOrTest => IsAutoTreasureHuntEnabled || manualTestModeActive;
 
     public TreasureHuntLogicMode SelectedLogicMode => configuration.LogicMode;
 
@@ -681,6 +688,13 @@ public sealed class Plugin : IDalamudPlugin
         {
             autoWaitingForTaskTreasureMap = false;
             waitingForAutomaticMapFlag = false;
+            if (IsAutoMapSupplementEnabled)
+            {
+                automaticMapSupplementTriggered = true;
+                BeginMapSupplementLogic(resumeAutoHunt: true);
+                return;
+            }
+
             AutoTreasureHuntStatus = "主背包和陆行鸟鞍囊中都没有可解读的地图。";
             return;
         }
@@ -988,15 +1002,10 @@ public sealed class Plugin : IDalamudPlugin
 
     public void TestWheelMapLink()
     {
+        ResumeAfterEmergencyStop();
         if (!IsWheelLogicSelected)
         {
             WheelMapLinkStatus = "当前不是车轮逻辑，无法测试聊天地图链接。";
-            return;
-        }
-
-        if (!IsAutoTreasureHuntEnabled || emergencyStopActive)
-        {
-            WheelMapLinkStatus = "自动挖宝未开启，车轮逻辑不会执行。";
             return;
         }
 
@@ -1077,19 +1086,26 @@ public sealed class Plugin : IDalamudPlugin
 
     public void TestMapSupplementLogic()
     {
-        ResumeAfterEmergencyStop();
-        BeginMapSupplementLogic(resumeAutoHunt: false);
+        _ = framework.RunOnFrameworkThread(() =>
+        {
+            ResumeAfterEmergencyStop();
+            BeginMapSupplementLogic(resumeAutoHunt: false);
+        });
     }
 
     public void TestPurchaseSelectedMap()
     {
-        ResumeAfterEmergencyStop();
-        BeginMapSupplementLogic(resumeAutoHunt: false);
+        _ = framework.RunOnFrameworkThread(() =>
+        {
+            ResumeAfterEmergencyStop();
+            BeginMapSupplementLogic(resumeAutoHunt: false);
+        });
     }
 
     public unsafe void EmergencyStop()
     {
         emergencyStopActive = true;
+        manualTestModeActive = false;
         ResetMovementWatchdog();
         UnloadOptimizedInteraction();
         IsAutoTreasureHuntEnabled = false;
@@ -1155,6 +1171,7 @@ public sealed class Plugin : IDalamudPlugin
         ResetRouletteTarget();
 
         marketBoardAfterTeleportPending = false;
+        marketBoardTeleportRetryQueued = false;
         marketBoardInteractionPending = false;
         marketBoardInteractionAttempted = false;
         marketBoardPositionSampleValid = false;
@@ -1173,11 +1190,12 @@ public sealed class Plugin : IDalamudPlugin
     private void ResumeAfterEmergencyStop()
     {
         emergencyStopActive = false;
+        manualTestModeActive = true;
     }
 
     private unsafe void StartMarketBoardTestOnFrameworkThread()
     {
-        if (!IsHeadLogicSelected || emergencyStopActive || !IsAutoTreasureHuntEnabled || IsRouletteMode)
+        if (!IsHeadLogicSelected || emergencyStopActive || !CanRunAutomationOrTest || IsRouletteMode)
         {
             return;
         }
@@ -1190,8 +1208,20 @@ public sealed class Plugin : IDalamudPlugin
 
         if (clientState.TerritoryType == LimsaLowerDecksTerritoryId)
         {
+            marketBoardTeleportRetryQueued = false;
             marketBoardAfterTeleportPending = false;
             MoveToMarketBoardOnFrameworkThread();
+            return;
+        }
+
+        if (objectTable.LocalPlayer == null ||
+            condition[ConditionFlag.BetweenAreas] ||
+            condition[ConditionFlag.BetweenAreas51] ||
+            condition[ConditionFlag.InCombat] ||
+            condition[ConditionFlag.OccupiedInQuestEvent])
+        {
+            TeleportTestStatus = "当前状态暂时不能传送，正在通过卫月框架下一帧重试前往市场。";
+            ScheduleMarketBoardTeleportAttempt(TimeSpan.FromSeconds(1));
             return;
         }
 
@@ -1207,23 +1237,63 @@ public sealed class Plugin : IDalamudPlugin
         var telepo = Telepo.Instance();
         if (telepo == null)
         {
-            FailMapSupplement("无法获取游戏传送组件。");
+            TeleportTestStatus = "卫月暂时无法获取游戏传送组件，正在主动重试。";
+            ScheduleMarketBoardTeleportAttempt(TimeSpan.FromSeconds(1));
+            return;
+        }
+
+        if (telepo->ActiveTeleportRequest)
+        {
+            TeleportTestStatus = "游戏已有传送请求正在处理，等待完成后重试前往市场。";
+            ScheduleMarketBoardTeleportAttempt(TimeSpan.FromSeconds(1));
             return;
         }
 
         if (!telepo->Teleport(limsaAetheryte.AetheryteId, limsaAetheryte.SubIndex))
         {
-            FailMapSupplement("游戏拒绝了前往利姆萨·罗敏萨的传送请求。");
+            TeleportTestStatus = "游戏暂未接受前往市场的传送请求，正在通过卫月框架主动重试。";
+            ScheduleMarketBoardTeleportAttempt(TimeSpan.FromSeconds(1));
             return;
         }
 
+        marketBoardTeleportRetryQueued = false;
         marketBoardAfterTeleportPending = true;
         TeleportTestStatus = "已请求传送到利姆萨·罗敏萨，等待切区后前往市场布告板。";
     }
 
+    private void ScheduleMarketBoardTeleportAttempt(TimeSpan delay)
+    {
+        if (marketBoardTeleportRetryQueued ||
+            !automaticMapSupplementRunning ||
+            emergencyStopActive ||
+            !CanRunAutomationOrTest)
+        {
+            return;
+        }
+
+        marketBoardTeleportRetryQueued = true;
+        _ = framework.RunOnTick(
+            () =>
+            {
+                if (!marketBoardTeleportRetryQueued)
+                {
+                    return;
+                }
+
+                marketBoardTeleportRetryQueued = false;
+                if (automaticMapSupplementRunning &&
+                    CanRunAutomationOrTest &&
+                    !emergencyStopActive)
+                {
+                    StartMarketBoardTestOnFrameworkThread();
+                }
+            },
+            delay: delay);
+    }
+
     private void MoveToMarketBoardOnFrameworkThread()
     {
-        if (!IsHeadLogicSelected || emergencyStopActive || !IsAutoTreasureHuntEnabled || IsRouletteMode)
+        if (!IsHeadLogicSelected || emergencyStopActive || !CanRunAutomationOrTest || IsRouletteMode)
         {
             return;
         }
@@ -1350,6 +1420,9 @@ public sealed class Plugin : IDalamudPlugin
         marketPurchaseStage = MarketPurchaseStage.None;
         marketPurchaseDeadline = default;
         marketSearchRunAt = default;
+        marketPricePageWaitSince = default;
+        marketPricePageReadySince = default;
+        marketPricePageRetryCount = 0;
         marketPurchaseItemId = 0;
         marketPurchaseItemName = string.Empty;
         marketPurchaseInitialMainCount = 0;
@@ -1533,6 +1606,8 @@ public sealed class Plugin : IDalamudPlugin
                 addon->ResultsList->DispatchItemEvent(index, AtkEventType.ListItemClick);
                 marketPurchaseStage = MarketPurchaseStage.WaitingBeforePurchase;
                 marketSearchRunAt = DateTime.UtcNow + MarketPurchaseActionDelay;
+                marketPricePageWaitSince = DateTime.UtcNow;
+                marketPricePageReadySince = default;
                 marketPurchaseDeadline = DateTime.UtcNow.AddSeconds(20);
                 TeleportTestStatus = $"已与搜索结果中的{marketPurchaseItemName}交互，交互满 1 秒后购买。";
                 return;
@@ -1555,13 +1630,13 @@ public sealed class Plugin : IDalamudPlugin
 
         if (!marketPurchaseSnapshotReady)
         {
-            if (infoProxy->WaitingForListings)
+            if (infoProxy->WaitingForListings || infoProxy->ListingCount == 0)
             {
-                return;
-            }
+                if (TryRetryMarketPricePage("价格页面已打开，正在等待卫月报价接口返回第一条报价。"))
+                {
+                    return;
+                }
 
-            if (infoProxy->ListingCount == 0)
-            {
                 return;
             }
 
@@ -1577,7 +1652,7 @@ public sealed class Plugin : IDalamudPlugin
 
             if (marketSubmittedListingIds.Contains(purchase.ListingId))
             {
-                TeleportTestStatus = $"卫月仍返回本轮已经提交过的{marketPurchaseItemName}报价，等待市场刷新下一条。";
+                TryRetryMarketPricePage($"卫月仍返回本轮已经提交过的{marketPurchaseItemName}报价，正在等待市场刷新。" );
                 return;
             }
 
@@ -1594,21 +1669,101 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        var resultAddon = gameGui.GetAddonByName<AddonItemSearchResult>("ItemSearchResult");
-        if (resultAddon == null ||
-            !resultAddon->IsReady ||
-            resultAddon->Results == null ||
-            resultAddon->Results->GetItemCount() == 0)
+        if (marketPricePageReadySince == default)
         {
-            TeleportTestStatus = "等待卫月价格列表第一行变为可交互状态。";
+            marketPricePageReadySince = DateTime.UtcNow;
+            TeleportTestStatus = "有效报价已经读取，等待报价稳定后通过卫月接口购买。";
             return;
         }
 
-        resultAddon->Results->SelectItem(0, dispatchEvent: false);
-        resultAddon->Results->DispatchItemEvent(0, AtkEventType.ListItemClick);
-        marketPurchaseStage = MarketPurchaseStage.WaitingForPurchaseConfirmation;
-        marketPurchaseDeadline = DateTime.UtcNow.AddSeconds(10);
-        TeleportTestStatus = $"已通过卫月接口点击第一条{marketPurchaseItemName}报价，等待购买确认窗口。";
+        if (DateTime.UtcNow - marketPricePageReadySince < TimeSpan.FromSeconds(1))
+        {
+            return;
+        }
+
+        if (!infoProxy->WaitingForListings && infoProxy->ListingCount > 0)
+        {
+            var currentListing = infoProxy->Listings[0];
+            if (currentListing.ListingId != marketPurchaseListingSnapshot.ListingId ||
+                currentListing.ItemId != marketPurchaseListingSnapshot.ItemId ||
+                currentListing.Quantity != marketPurchaseListingSnapshot.Quantity ||
+                currentListing.UnitPrice != marketPurchaseListingSnapshot.UnitPrice)
+            {
+                marketPurchaseSnapshotReady = false;
+                marketPricePageReadySince = default;
+                TeleportTestStatus = "最低价报价在购买前发生变化，正在通过卫月接口重新读取报价。";
+                return;
+            }
+        }
+
+        var purchaseRequest = marketPurchaseListingSnapshot;
+        if (!infoProxy->SetLastPurchasedItem(&purchaseRequest))
+        {
+            marketPricePageReadySince = default;
+            TeleportTestStatus = "卫月接口尚未接受最低价报价，等待价格页稳定后重试。";
+            return;
+        }
+
+        if (!infoProxy->SendPurchaseRequestPacket())
+        {
+            marketPricePageReadySince = default;
+            TeleportTestStatus = "卫月接口暂未提交购买请求，等待一秒后在当前价格页重试。";
+            return;
+        }
+
+        marketSubmittedListingIds.Add(marketPurchaseListingSnapshot.ListingId);
+        marketPurchaseStage = MarketPurchaseStage.WaitingForDelivery;
+        marketPurchaseDeadline = DateTime.UtcNow.AddSeconds(15);
+        TeleportTestStatus = $"已通过卫月接口提交 1 张{marketPurchaseItemName}的购买请求，最低单价 {marketPurchaseSavedUnitPrice:N0} 金币，等待进入主背包。";
+        AutoTreasureHuntStatus = TeleportTestStatus;
+    }
+
+    private bool TryRetryMarketPricePage(string waitingStatus)
+    {
+        TeleportTestStatus = waitingStatus;
+        if (marketPricePageWaitSince == default)
+        {
+            marketPricePageWaitSince = DateTime.UtcNow;
+        }
+
+        if (DateTime.UtcNow - marketPricePageWaitSince < TimeSpan.FromSeconds(5) ||
+            marketPricePageRetryCount >= 2)
+        {
+            return false;
+        }
+
+        marketPricePageRetryCount++;
+        RetryMarketPurchaseInteraction();
+        return true;
+    }
+
+    private void RetryMarketPurchaseInteraction()
+    {
+        var automatic = automaticMapSupplementRunning;
+        var purchaseStep = mapSupplementPurchaseStep;
+        var retryCount = marketPricePageRetryCount;
+        CloseWorkflowBlockingWindows();
+        ResetMarketPurchase();
+        marketPricePageRetryCount = retryCount;
+        marketBoardAfterTeleportPending = false;
+        marketBoardInteractionPending = true;
+        marketBoardInteractionAttempted = false;
+        marketBoardPositionSampleValid = false;
+
+        if (automatic)
+        {
+            mapSupplementStage = purchaseStep switch
+            {
+                1 => MapSupplementStage.WaitingForFirstPurchase,
+                2 => MapSupplementStage.WaitingForSecondPurchase,
+                3 => MapSupplementStage.WaitingForThirdPurchase,
+                _ => MapSupplementStage.WaitingForFirstPurchase,
+            };
+            mapSupplementDeadline = DateTime.UtcNow.AddSeconds(30);
+        }
+
+        AutoTreasureHuntStatus = $"市场价格页加载未稳定，正在第 {marketPricePageRetryCount} 次主动重试购买，不等待总防卡恢复。";
+        TeleportTestStatus = AutoTreasureHuntStatus;
     }
 
     private void FailMarketPurchase(string failure)
@@ -1670,6 +1825,14 @@ public sealed class Plugin : IDalamudPlugin
 
     private void BeginMapSupplementLogic(bool resumeAutoHunt)
     {
+        if (!CanRunAutomationOrTest || !IsHeadLogicSelected || emergencyStopActive)
+        {
+            automaticMapSupplementTriggered = false;
+            TeleportTestStatus = "购买三张地图测试只能在车头模式且未紧急停止时运行。";
+            AutoTreasureHuntStatus = TeleportTestStatus;
+            return;
+        }
+
         marketSubmittedListingIds.Clear();
         RefreshTreasureMapCounts();
         if (MainInventoryTreasureMapCount > 0 || SaddlebagTreasureMapCount > 0 || TaskTreasureMapCount > 0)
@@ -1689,6 +1852,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         ResetMarketPurchase();
+        CloseWorkflowBlockingWindows();
         mountAfterTeleportPending = false;
         mountRetryQueued = false;
         dismountAtFlagPending = false;
@@ -1703,10 +1867,13 @@ public sealed class Plugin : IDalamudPlugin
         selectMapPending = false;
         confirmMapPending = false;
         marketBoardAfterTeleportPending = false;
+        marketBoardTeleportRetryQueued = false;
         marketBoardInteractionPending = false;
         marketBoardInteractionAttempted = false;
         marketBoardPositionSampleValid = false;
         automaticMapSupplementRunning = true;
+        workflowWatchdogState = string.Empty;
+        workflowWatchdogStateSince = default;
         mapSupplementStage = MapSupplementStage.TravelingToBoard;
         mapSupplementPurchaseStep = 1;
         mapSupplementResumeAutoHunt = resumeAutoHunt;
@@ -1714,7 +1881,7 @@ public sealed class Plugin : IDalamudPlugin
         mapSupplementDeadline = DateTime.UtcNow.AddMinutes(2);
         TeleportTestStatus = "补图逻辑：正在前往利姆萨·罗敏萨市场布告板购买第 1 张地图。";
         AutoTreasureHuntStatus = TeleportTestStatus;
-        _ = framework.RunOnFrameworkThread(StartMarketBoardTestOnFrameworkThread);
+        StartMarketBoardTestOnFrameworkThread();
     }
 
     private void TryHandleMapSupplement()
@@ -1932,6 +2099,7 @@ public sealed class Plugin : IDalamudPlugin
         mapSupplementDeadline = default;
         mapSupplementResumeAutoHunt = false;
         marketBoardAfterTeleportPending = false;
+        marketBoardTeleportRetryQueued = false;
         marketBoardInteractionPending = false;
         marketBoardInteractionAttempted = false;
         marketBoardPositionSampleValid = false;
@@ -1957,6 +2125,7 @@ public sealed class Plugin : IDalamudPlugin
         mapSupplementDeadline = default;
         mapSupplementResumeAutoHunt = false;
         marketBoardAfterTeleportPending = false;
+        marketBoardTeleportRetryQueued = false;
         marketBoardInteractionPending = false;
         marketBoardInteractionAttempted = false;
         marketBoardPositionSampleValid = false;
@@ -2408,6 +2577,7 @@ public sealed class Plugin : IDalamudPlugin
         {
             ResetMarketPurchase();
             marketBoardAfterTeleportPending = false;
+            marketBoardTeleportRetryQueued = false;
             marketBoardInteractionPending = false;
             marketBoardInteractionAttempted = false;
             CloseWorkflowBlockingWindows();
@@ -2444,6 +2614,7 @@ public sealed class Plugin : IDalamudPlugin
         CloseWorkflowBlockingWindows();
         ResetMarketPurchase();
         marketBoardAfterTeleportPending = false;
+        marketBoardTeleportRetryQueued = false;
         marketBoardInteractionPending = false;
         marketBoardInteractionAttempted = false;
         selectMapPending = false;
@@ -2528,13 +2699,19 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnFrameworkUpdate(IFramework framework)
     {
-        if (!IsCredentialValidated || !IsAutoTreasureHuntEnabled)
+        if (!IsCredentialValidated || !CanRunAutomationOrTest)
         {
             return;
         }
 
         if (emergencyStopActive)
         {
+            return;
+        }
+
+        if (!IsAutoTreasureHuntEnabled && manualTestModeActive)
+        {
+            TryHandleManualTestUpdate();
             return;
         }
 
@@ -2639,6 +2816,57 @@ public sealed class Plugin : IDalamudPlugin
         TryHandleTreasurePortal();
     }
 
+    private void TryHandleManualTestUpdate()
+    {
+        if (TryHandleMovementWatchdog() || TryHandleWorkflowWatchdog())
+        {
+            return;
+        }
+
+        if (IsWheelLogicSelected)
+        {
+            TryProcessWheelMapLink();
+            TryHandleWheelPostTeleport();
+            TryDismountAtFlag();
+            return;
+        }
+
+        TryHandleSaddlebagStoreTest();
+        if (saddlebagStoreTestPending)
+        {
+            return;
+        }
+
+        TryHandleSaddlebagTakeTest();
+        if (saddlebagTakeTestPending)
+        {
+            return;
+        }
+
+        if (automaticMapSupplementRunning)
+        {
+            TryHandleMapSupplement();
+            return;
+        }
+
+        if (rouletteExitTestPending)
+        {
+            TryHandleRouletteExitTest();
+            return;
+        }
+
+        TryInteractWithMarketBoardAfterArrival();
+        TryHandleMarketPurchase();
+        TrySelectPendingMap();
+        TryConfirmPendingMap();
+        TryConfirmTreasureChest();
+        TryConfirmTreasurePortal();
+        TryHandleTreasureCombat();
+        TryDismountAtFlag();
+        TryHandleTreasureChest();
+        TryHandleTreasurePortal();
+    }
+
     private void TryHandleWheelCombatState()
     {
         var inCombat = condition[ConditionFlag.InCombat];
@@ -2658,7 +2886,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnChatMessage(IChatMessage message)
     {
-        if (!IsWheelLogicSelected || !IsAutoTreasureHuntEnabled || emergencyStopActive)
+        if (!IsWheelLogicSelected || emergencyStopActive)
         {
             return;
         }
@@ -2672,6 +2900,12 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         wheelLastMapLink = CloneMapLink(mapLink);
+        if (!CanRunAutomationOrTest)
+        {
+            WheelMapLinkStatus = $"已缓存聊天地图链接：{mapLink.PlaceName} {mapLink.CoordinateString}，可点击测试按钮读取。";
+            return;
+        }
+
         wheelPendingMapLink = CloneMapLink(mapLink);
         WheelMapLinkStatus = $"检测到聊天地图链接：{mapLink.PlaceName} {mapLink.CoordinateString}，准备设置红旗。";
         AutoTreasureHuntStatus = $"车轮：检测到聊天地图链接 {mapLink.PlaceName} {mapLink.CoordinateString}，正在获取红旗。";
@@ -2922,7 +3156,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         UpdateOptimizedInteractionForMap(clientState.MapId);
 
-        if (!IsHeadLogicSelected || !IsCredentialValidated || !IsAutoTreasureHuntEnabled)
+        if (!IsHeadLogicSelected || !IsCredentialValidated || !CanRunAutomationOrTest)
         {
             return;
         }
@@ -2941,6 +3175,7 @@ public sealed class Plugin : IDalamudPlugin
         if (marketBoardAfterTeleportPending && eventArgs.TerritoryType.RowId == LimsaLowerDecksTerritoryId)
         {
             marketBoardAfterTeleportPending = false;
+            marketBoardTeleportRetryQueued = false;
             TeleportTestStatus = "已到达利姆萨·罗敏萨，两秒后前往市场布告板。";
             _ = framework.RunOnTick(
                 MoveToMarketBoardOnFrameworkThread,
@@ -3150,6 +3385,7 @@ public sealed class Plugin : IDalamudPlugin
         treasureChestPending = false;
         treasurePortalPending = false;
         marketBoardAfterTeleportPending = false;
+        marketBoardTeleportRetryQueued = false;
         marketBoardInteractionPending = false;
         marketBoardInteractionAttempted = false;
         marketBoardPositionSampleValid = false;
@@ -3574,12 +3810,6 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         RefreshTreasureMapCounts();
-        if (!IsAutoTreasureHuntEnabled)
-        {
-            TreasureMapUseStatus = "请先开启自动挖宝。";
-            return;
-        }
-
         if (!HasTreasureMap)
         {
             TreasureMapUseStatus = $"背包中没有{SelectedTreasureMapName}。";
@@ -4246,7 +4476,7 @@ public sealed class Plugin : IDalamudPlugin
                 () =>
                 {
                     headFlagTeleportPending = false;
-                    if (!IsAutoTreasureHuntEnabled || emergencyStopActive)
+                    if (!CanRunAutomationOrTest || emergencyStopActive)
                     {
                         headFlagTeleportReady = false;
                         return;
@@ -4431,7 +4661,7 @@ public sealed class Plugin : IDalamudPlugin
             {
                 if (!headFlagAnnouncementPending ||
                     !IsHeadLogicSelected ||
-                    !IsAutoTreasureHuntEnabled ||
+                    !CanRunAutomationOrTest ||
                     emergencyStopActive)
                 {
                     return;
@@ -4491,7 +4721,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private bool TryRequestAutomaticTreasureMap()
     {
-        if (!IsAutoTreasureHuntEnabled || !HasTaskTreasureMap)
+        if (!CanRunAutomationOrTest || !HasTaskTreasureMap)
         {
             return false;
         }
@@ -4512,7 +4742,7 @@ public sealed class Plugin : IDalamudPlugin
                 () =>
                 {
                     autoMapFlagRetryQueued = false;
-                    if (IsAutoTreasureHuntEnabled && HasTaskTreasureMap)
+                    if (CanRunAutomationOrTest && HasTaskTreasureMap)
                     {
                         TestTeleportToOpenedMapAetheryteOnFrameworkThread();
                     }
@@ -4698,7 +4928,7 @@ public sealed class Plugin : IDalamudPlugin
     private unsafe void UseDismountAfterArrivalOnFrameworkThread()
     {
         if ((!IsHeadLogicSelected && !IsWheelLogicSelected) ||
-            !IsAutoTreasureHuntEnabled ||
+            !CanRunAutomationOrTest ||
             (IsHeadLogicSelected && IsRouletteMode) ||
             emergencyStopActive)
         {
@@ -4766,7 +4996,7 @@ public sealed class Plugin : IDalamudPlugin
     private void WaitForDismountThenDig()
     {
         if ((!IsHeadLogicSelected && !IsWheelLogicSelected) ||
-            !IsAutoTreasureHuntEnabled ||
+            !CanRunAutomationOrTest ||
             (IsHeadLogicSelected && IsRouletteMode) ||
             emergencyStopActive)
         {
@@ -4849,7 +5079,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private unsafe void UseDigOnFrameworkThread()
     {
-        if (!IsHeadLogicSelected || emergencyStopActive || !IsAutoTreasureHuntEnabled || IsRouletteMode)
+        if (!IsHeadLogicSelected || emergencyStopActive || !CanRunAutomationOrTest || IsRouletteMode)
         {
             return;
         }
@@ -5324,7 +5554,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private unsafe void UseTreasureMapOnFrameworkThread()
     {
-        if (!IsHeadLogicSelected || emergencyStopActive || !IsAutoTreasureHuntEnabled || IsRouletteMode)
+        if (!IsHeadLogicSelected || emergencyStopActive || !CanRunAutomationOrTest || IsRouletteMode)
         {
             return;
         }
@@ -5392,7 +5622,7 @@ public sealed class Plugin : IDalamudPlugin
             () =>
             {
                 questDecipherRetryQueued = false;
-                if (IsAutoTreasureHuntEnabled && !IsRouletteMode && !emergencyStopActive)
+                if (CanRunAutomationOrTest && !IsRouletteMode && !emergencyStopActive)
                 {
                     UseTreasureMapOnFrameworkThread();
                 }
