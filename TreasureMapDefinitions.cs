@@ -1,0 +1,51 @@
+namespace AutoTreasureHunt;
+
+/// <summary>藏宝图进入副本后的玩法类型。</summary>
+internal enum TreasureMapRoute
+{
+    Roulette,
+    DoorSelection,
+}
+
+/// <summary>一张可由车头处理的藏宝图及其对应任务道具。</summary>
+internal readonly record struct TreasureMapOption(
+    string Name,
+    string TaskName,
+    string MarketSearchName,
+    uint MapItemId,
+    uint TaskItemId,
+    TreasureMapRoute Route);
+
+/// <summary>
+/// 车头藏宝图与转盘实体的集中配置。
+/// 后续新增地图或潜网巡梦，只修改本文件中对应的 List 即可。
+/// </summary>
+internal static class TreasureMapDefinitions
+{
+    // Name 为插件显示名，MarketSearchName 为市场布告板精确搜索名。
+    // MapItemId 为普通藏宝图道具 ID，TaskItemId 为解读后任务道具 ID。
+    // 【转盘地图】进入副本后使用当前的转盘逻辑；新转盘藏宝图加在此 List。
+    internal static readonly List<TreasureMapOption> RouletteTreasureMapOptions =
+    [
+        new("陈旧的卡冈图亚革地图", "卡冈图亚草制的宝物地图", MarketSearchName: "陈旧的卡冈图亚革地图", MapItemId: 46185, TaskItemId: 2003785, Route: TreasureMapRoute.Roulette),
+    ];
+
+    // 【选门地图】进入副本后进入“选门”空逻辑；新选门藏宝图加在此 List。
+    internal static readonly List<TreasureMapOption> DoorSelectionTreasureMapOptions =
+    [
+        new("陈旧的狞豹革地图（正在适配）", "狩豹革制的宝物地图", MarketSearchName: "陈旧的狞豹革地图", MapItemId: 43557, TaskItemId: 2003563, Route: TreasureMapRoute.DoorSelection),
+    ];
+
+    // 【合并列表】界面选择、背包统计、补图购买统一使用；不直接在这里添加地图。
+    internal static readonly List<TreasureMapOption> HeadTreasureMapOptions =
+    [
+        .. RouletteTreasureMapOptions,
+        .. DoorSelectionTreasureMapOptions,
+    ];
+
+    // 【转盘实体 ID】转盘内“潜网巡梦”的 BaseID；新增同类实体时只需在此添加 ID。
+    internal static readonly List<uint> RouletteDreamBaseIds =
+    [
+        2014790,
+    ];
+}

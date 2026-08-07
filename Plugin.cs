@@ -53,32 +53,15 @@ public sealed class Plugin : IDalamudPlugin
         WaitingForThirdPurchase,
     }
 
-    private readonly record struct TreasureMapOption(
-        string Name,
-        string TaskName,
-        uint MapItemId,
-        uint TaskItemId);
-
-    private static readonly TreasureMapOption[] TreasureMapOptions =
-    [
-        new("陈旧的卡冈图亚革地图", "卡冈图亚草制的宝物地图", GagantuaTreasureMapItemId, GagantuaTaskTreasureMapItemId),
-        new("陈旧的狞豹革地图（占位用未适配）", "狩豹革制的宝物地图", LeopardTreasureMapItemId, LeopardTaskTreasureMapItemId),
-    ];
-
     private const string VnavmeshInternalName = "vnavmesh";
     private const string GlobetrotterInternalName = "globetrotter";
     private const string BossModRebornInternalName = "BossModReborn";
-    private const uint LeopardTreasureMapItemId = 43557;
-    private const uint LeopardTaskTreasureMapItemId = 2003563;
-    private const uint GagantuaTreasureMapItemId = 46185;
-    private const uint GagantuaTaskTreasureMapItemId = 2003785;
     private const uint DecipherGeneralActionId = 19;
     private const uint MountRouletteGeneralActionId = 9;
     private const uint DismountGeneralActionId = 23;
     private const uint DigGeneralActionId = 20;
     private const uint RouletteMapId = 1059;
     private const uint OptimizedInteractionMapId = 12;
-    private const uint RouletteDreamBaseId = 2014790;
     private const uint RouletteExitBaseId = 2000139;
     private const float RouletteInteractionDistance = 2f;
     private const uint LimsaLowerDecksTerritoryId = 129;
@@ -203,6 +186,10 @@ public sealed class Plugin : IDalamudPlugin
     private bool saddlebagTakeMoveRequested;
     private bool saddlebagTakeContextMenuPending;
     private int selectedTreasureMapIndex;
+    private TreasureMapRoute activeTreasureMapRoute = TreasureMapRoute.Roulette;
+    private bool doorSelectionPortalEntryPending;
+    private bool doorSelectionModeActive;
+    private uint doorSelectionInstanceMapId;
     private int decipherRetryCount;
     private bool decipherRetryQueued;
     private bool questDecipherRetryQueued;
@@ -280,6 +267,10 @@ public sealed class Plugin : IDalamudPlugin
     private bool optimizedInteractionLoaded;
     private bool emergencyStopActive;
     private bool manualTestModeActive;
+    private readonly Queue<string> interactableObjectEchoQueue = [];
+    private int interactableObjectEchoGeneration;
+    private int interactableObjectEchoTotal;
+    private string interactableObjectEchoCategory = "可选中物体";
     private string workflowWatchdogState = string.Empty;
     private DateTime workflowWatchdogStateSince;
     private DateTime workflowWatchdogCooldownUntil;
@@ -392,6 +383,8 @@ public sealed class Plugin : IDalamudPlugin
 
     public string SaddlebagMoveStatus { get; private set; } = "尚未测试取出鞍囊地图。";
 
+    public string InteractableObjectScanStatus { get; private set; } = "尚未遍历可交互物体。";
+
     public bool IsAutoMapSupplementEnabled => configuration.AutoMapSupplementEnabled;
 
     private bool CanRunAutomationOrTest => IsAutoTreasureHuntEnabled || manualTestModeActive;
@@ -404,13 +397,19 @@ public sealed class Plugin : IDalamudPlugin
 
     public string SelectedLogicModeName => IsHeadLogicSelected ? "车头" : "车轮";
 
-    public bool IsRouletteMode => clientState.MapId == RouletteMapId;
+    private TreasureMapRoute SelectedTreasureMapRoute => TreasureMapDefinitions.HeadTreasureMapOptions[selectedTreasureMapIndex].Route;
+
+    private bool IsRouletteMap => clientState.MapId == RouletteMapId;
+
+    public bool IsRouletteMode => IsRouletteMap && activeTreasureMapRoute == TreasureMapRoute.Roulette;
 
     public string CurrentLogicName => !IsAutoTreasureHuntEnabled
         ? $"{SelectedLogicModeName}（未运行）"
         : IsWheelLogicSelected
             ? "车轮 / 接受传送并前往红旗"
-            : rouletteModeActive || IsRouletteMode
+            : doorSelectionModeActive
+                ? "车头 / 选门"
+                : rouletteModeActive || IsRouletteMode
                 ? "车头 / 转盘"
                 : automaticMapSupplementRunning ||
                   marketBoardAfterTeleportPending ||
@@ -420,17 +419,26 @@ public sealed class Plugin : IDalamudPlugin
 
     public int SelectedTreasureMapIndex => selectedTreasureMapIndex;
 
-    public int TreasureMapOptionCount => TreasureMapOptions.Length;
+    public int TreasureMapOptionCount => TreasureMapDefinitions.HeadTreasureMapOptions.Count;
 
-    public string SelectedTreasureMapName => TreasureMapOptions[selectedTreasureMapIndex].Name;
+    public string SelectedTreasureMapName => TreasureMapDefinitions.HeadTreasureMapOptions[selectedTreasureMapIndex].Name;
 
-    public string SelectedTaskTreasureMapName => TreasureMapOptions[selectedTreasureMapIndex].TaskName;
+    public string SelectedTaskTreasureMapName => TreasureMapDefinitions.HeadTreasureMapOptions[selectedTreasureMapIndex].TaskName;
 
-    public uint SelectedTreasureMapItemId => TreasureMapOptions[selectedTreasureMapIndex].MapItemId;
+    public string SelectedTreasureMapMarketSearchName => TreasureMapDefinitions.HeadTreasureMapOptions[selectedTreasureMapIndex].MarketSearchName;
 
-    public uint SelectedTaskTreasureMapItemId => TreasureMapOptions[selectedTreasureMapIndex].TaskItemId;
+    public uint SelectedTreasureMapItemId => TreasureMapDefinitions.HeadTreasureMapOptions[selectedTreasureMapIndex].MapItemId;
 
-    public string GetTreasureMapOptionName(int index) => TreasureMapOptions[index].Name;
+    public uint SelectedTaskTreasureMapItemId => TreasureMapDefinitions.HeadTreasureMapOptions[selectedTreasureMapIndex].TaskItemId;
+
+    public string SelectedTreasureMapRouteName => TreasureMapDefinitions.HeadTreasureMapOptions[selectedTreasureMapIndex].Route switch
+    {
+        TreasureMapRoute.Roulette => "转盘",
+        TreasureMapRoute.DoorSelection => "选门",
+        _ => "未知",
+    };
+
+    public string GetTreasureMapOptionName(int index) => TreasureMapDefinitions.HeadTreasureMapOptions[index].Name;
 
     public event Action<bool>? VnavmeshRunningChanged;
 
@@ -616,7 +624,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (index < 0 || index >= TreasureMapOptions.Length || index == selectedTreasureMapIndex)
+        if (index < 0 || index >= TreasureMapDefinitions.HeadTreasureMapOptions.Count || index == selectedTreasureMapIndex)
         {
             return;
         }
@@ -630,45 +638,18 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    private bool TrySelectMapTypeForAutomaticRun()
-    {
-        for (var index = 0; index < TreasureMapOptions.Length; index++)
-        {
-            var option = TreasureMapOptions[index];
-            var taskCount = CountTreasureMaps(TaskItemInventoryTypes, option.TaskItemId);
-            if (taskCount > 0)
-            {
-                selectedTreasureMapIndex = index;
-                return true;
-            }
-        }
-
-        for (var index = 0; index < TreasureMapOptions.Length; index++)
-        {
-            var option = TreasureMapOptions[index];
-            var mapCount = CountTreasureMaps(MainInventoryTypes, option.MapItemId) +
-                           CountTreasureMaps(SaddlebagInventoryTypes, option.MapItemId);
-            if (mapCount > 0)
-            {
-                selectedTreasureMapIndex = index;
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     private void StartAutoTreasureHuntOnFrameworkThread()
     {
         if (!IsHeadLogicSelected ||
             !IsAutoTreasureHuntEnabled ||
             IsRouletteMode ||
+            doorSelectionModeActive ||
             automaticMapSupplementRunning)
         {
             return;
         }
 
-        TrySelectMapTypeForAutomaticRun();
+        activeTreasureMapRoute = SelectedTreasureMapRoute;
         RefreshTreasureMapCounts();
         if (HasTaskTreasureMap)
         {
@@ -964,6 +945,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        activeTreasureMapRoute = SelectedTreasureMapRoute;
         mountAfterTeleportPending = false;
         mountRetryQueued = false;
         autoMapCommandSent = false;
@@ -1084,6 +1066,100 @@ public sealed class Plugin : IDalamudPlugin
         _ = framework.RunOnFrameworkThread(TryHandleRouletteExitTest);
     }
 
+    public void TestListInteractableObjects()
+    {
+        TestListObjects(targetable: true, "可选中物体");
+    }
+
+    public void TestListNonTargetableObjects()
+    {
+        TestListObjects(targetable: false, "不可右键选中物体");
+    }
+
+    private void TestListObjects(bool targetable, string category)
+    {
+        _ = framework.RunOnFrameworkThread(() =>
+        {
+            ResumeAfterEmergencyStop();
+            interactableObjectEchoGeneration++;
+            var generation = interactableObjectEchoGeneration;
+            interactableObjectEchoQueue.Clear();
+            interactableObjectEchoCategory = category;
+
+            var objects = objectTable
+                .Where(gameObject =>
+                    gameObject.IsTargetable == targetable &&
+                    gameObject.EntityId != 0 &&
+                    (!targetable || gameObject.BaseId != 0))
+                .Select(gameObject => new
+                {
+                    Name = gameObject.Name.TextValue,
+                    gameObject.EntityId,
+                    gameObject.BaseId,
+                    ObjectKind = gameObject.ObjectKind.ToString(),
+                })
+                .OrderBy(gameObject => gameObject.ObjectKind)
+                .ThenBy(gameObject => gameObject.BaseId)
+                .ThenBy(gameObject => gameObject.EntityId)
+                .ToList();
+
+            foreach (var gameObject in objects)
+            {
+                var name = string.IsNullOrWhiteSpace(gameObject.Name)
+                    ? "无名称物体"
+                    : gameObject.Name.Replace('\r', ' ').Replace('\n', ' ').Trim();
+                interactableObjectEchoQueue.Enqueue(
+                    $"{name} 类型:{gameObject.ObjectKind} ID:{gameObject.EntityId} BaseID:[{gameObject.BaseId}]");
+            }
+
+            interactableObjectEchoTotal = interactableObjectEchoQueue.Count;
+            if (interactableObjectEchoTotal == 0)
+            {
+                InteractableObjectScanStatus = $"当前对象表中没有{category}。";
+                PrintEcho(InteractableObjectScanStatus);
+                return;
+            }
+
+            InteractableObjectScanStatus =
+                $"已找到 {interactableObjectEchoTotal} 个{category}，正在通过 /e 逐条输出。";
+            SendNextInteractableObjectEcho(generation);
+        });
+    }
+
+    private void SendNextInteractableObjectEcho(int generation)
+    {
+        if (generation != interactableObjectEchoGeneration || emergencyStopActive)
+        {
+            return;
+        }
+
+        if (interactableObjectEchoQueue.Count == 0)
+        {
+            InteractableObjectScanStatus =
+                $"遍历完成，已通过 /e 输出 {interactableObjectEchoTotal} 个{interactableObjectEchoCategory}。";
+            return;
+        }
+
+        var message = interactableObjectEchoQueue.Dequeue();
+        if (!PrintEcho(message))
+        {
+            interactableObjectEchoQueue.Clear();
+            InteractableObjectScanStatus = "游戏聊天组件暂不可用，/e 输出已停止。";
+            return;
+        }
+        var sent = interactableObjectEchoTotal - interactableObjectEchoQueue.Count;
+        InteractableObjectScanStatus =
+            $"正在输出{interactableObjectEchoCategory}：{sent}/{interactableObjectEchoTotal}。";
+        _ = framework.RunOnTick(
+            () => SendNextInteractableObjectEcho(generation),
+            delay: TimeSpan.FromMilliseconds(250));
+    }
+
+    private bool PrintEcho(string message)
+    {
+        return TrySendChatBoxEntry($"/e {message}");
+    }
+
     public void TestMapSupplementLogic()
     {
         _ = framework.RunOnFrameworkThread(() =>
@@ -1106,6 +1182,8 @@ public sealed class Plugin : IDalamudPlugin
     {
         emergencyStopActive = true;
         manualTestModeActive = false;
+        interactableObjectEchoGeneration++;
+        interactableObjectEchoQueue.Clear();
         ResetMovementWatchdog();
         UnloadOptimizedInteraction();
         IsAutoTreasureHuntEnabled = false;
@@ -1169,6 +1247,9 @@ public sealed class Plugin : IDalamudPlugin
         rouletteInteractedChestEntities.Clear();
         rouletteChestDisappearDeadline = default;
         ResetRouletteTarget();
+        doorSelectionPortalEntryPending = false;
+        doorSelectionModeActive = false;
+        doorSelectionInstanceMapId = 0;
 
         marketBoardAfterTeleportPending = false;
         marketBoardTeleportRetryQueued = false;
@@ -1339,7 +1420,7 @@ public sealed class Plugin : IDalamudPlugin
                     marketBoardInteractionAttempted = false;
                     marketBoardPositionSampleValid = false;
                     marketPurchaseItemId = SelectedTreasureMapItemId;
-                    marketPurchaseItemName = SelectedTreasureMapName;
+                    marketPurchaseItemName = SelectedTreasureMapMarketSearchName;
                     marketPurchaseInitialMainCount = CountTreasureMaps(MainInventoryTypes, marketPurchaseItemId);
                     marketPurchaseAutomatic = automaticMapSupplementRunning;
                     marketPurchaseStage = MarketPurchaseStage.WaitingForSearchAddon;
@@ -1795,7 +1876,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (HasAnySupportedTreasureMap())
+        if (HasTreasureMap || HasTaskTreasureMap)
         {
             automaticMapSupplementTriggered = false;
             return;
@@ -2156,21 +2237,6 @@ public sealed class Plugin : IDalamudPlugin
 
         commandManager.ProcessCommand("/pdr unload OptimizedInteraction");
         optimizedInteractionLoaded = false;
-    }
-
-    private bool HasAnySupportedTreasureMap()
-    {
-        foreach (var option in TreasureMapOptions)
-        {
-            if (CountTreasureMaps(MainInventoryTypes, option.MapItemId) > 0 ||
-                CountTreasureMaps(SaddlebagInventoryTypes, option.MapItemId) > 0 ||
-                CountTreasureMaps(TaskItemInventoryTypes, option.TaskItemId) > 0)
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private bool TryHandleWorkflowWatchdog()
@@ -2740,7 +2806,13 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        // 地图 1059 必须优先于补图、鞍囊和野外流程接管。
+        if (doorSelectionModeActive)
+        {
+            TryHandleDoorSelectionMode();
+            return;
+        }
+
+        // 转盘地图必须优先于补图、鞍囊和野外流程接管。
         if (IsRouletteMode)
         {
             if (TryHandleMovementWatchdog())
@@ -2828,6 +2900,11 @@ public sealed class Plugin : IDalamudPlugin
             TryProcessWheelMapLink();
             TryHandleWheelPostTeleport();
             TryDismountAtFlag();
+            return;
+        }
+
+        if (doorSelectionModeActive)
+        {
             return;
         }
 
@@ -3133,13 +3210,28 @@ public sealed class Plugin : IDalamudPlugin
 
             if (!IsHeadLogicSelected ||
                 !IsCredentialValidated ||
-                emergencyStopActive ||
-                !IsAutoTreasureHuntEnabled)
+                emergencyStopActive)
             {
                 return;
             }
 
-            if (mapId == RouletteMapId || clientState.MapId == RouletteMapId)
+            if (doorSelectionModeActive && mapId != doorSelectionInstanceMapId)
+            {
+                ExitDoorSelectionMode();
+            }
+
+            if (doorSelectionPortalEntryPending && CanRunAutomationOrTest)
+            {
+                EnterDoorSelectionMode();
+                return;
+            }
+
+            if (!IsAutoTreasureHuntEnabled)
+            {
+                return;
+            }
+
+            if (IsRouletteMode)
             {
                 EnterRouletteMode();
                 return;
@@ -3162,6 +3254,17 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         if (emergencyStopActive)
+        {
+            return;
+        }
+
+        if (doorSelectionPortalEntryPending)
+        {
+            EnterDoorSelectionMode();
+            return;
+        }
+
+        if (doorSelectionModeActive)
         {
             return;
         }
@@ -3330,6 +3433,7 @@ public sealed class Plugin : IDalamudPlugin
         if (addon->FireCallbackInt(0))
         {
             confirmTreasurePortalPending = false;
+            doorSelectionPortalEntryPending = activeTreasureMapRoute == TreasureMapRoute.DoorSelection;
             TeleportTestStatus = "已确认进入传送魔纹。";
         }
         else
@@ -3393,6 +3497,61 @@ public sealed class Plugin : IDalamudPlugin
         ResetMarketPurchase();
         commandManager.ProcessCommand("/bmrai on");
         AutoTreasureHuntStatus = "转盘：卫月检测到当前地图 ID 1059，并执行 /bmrai on。";
+    }
+
+    private void EnterDoorSelectionMode()
+    {
+        if (doorSelectionModeActive || activeTreasureMapRoute != TreasureMapRoute.DoorSelection)
+        {
+            return;
+        }
+
+        doorSelectionPortalEntryPending = false;
+        doorSelectionModeActive = true;
+        doorSelectionInstanceMapId = clientState.MapId;
+        commandManager.ProcessCommand("/vnav stop");
+        UnloadOptimizedInteraction();
+        mountAfterTeleportPending = false;
+        mountRetryQueued = false;
+        dismountAtFlagPending = false;
+        treasureChestPending = false;
+        confirmTreasureChestPending = false;
+        treasurePortalPending = false;
+        confirmTreasurePortalPending = false;
+        AutoTreasureHuntStatus = "选门：已进入选门副本，当前为空逻辑，等待后续适配。";
+        TeleportTestStatus = AutoTreasureHuntStatus;
+    }
+
+    private void TryHandleDoorSelectionMode()
+    {
+        // 选门副本逻辑预留：当前不执行任何交互、选门或战斗操作。
+    }
+
+    private void ExitDoorSelectionMode()
+    {
+        if (!doorSelectionModeActive)
+        {
+            return;
+        }
+
+        doorSelectionModeActive = false;
+        doorSelectionInstanceMapId = 0;
+        doorSelectionPortalEntryPending = false;
+        if (!IsAutoTreasureHuntEnabled || emergencyStopActive)
+        {
+            return;
+        }
+
+        AutoTreasureHuntStatus = "选门流程已结束，正在重新检查任务道具、主背包和陆行鸟鞍囊。";
+        _ = framework.RunOnTick(
+            () =>
+            {
+                if (IsAutoTreasureHuntEnabled && !doorSelectionModeActive && !IsRouletteMode && !emergencyStopActive)
+                {
+                    StartAutoTreasureHuntOnFrameworkThread();
+                }
+            },
+            delay: TimeSpan.FromSeconds(2));
     }
 
     private void ExitRouletteMode()
@@ -3523,7 +3682,7 @@ public sealed class Plugin : IDalamudPlugin
         rouletteChestDisappearDeadline = default;
 
         var dream = objectTable.FirstOrDefault(gameObject =>
-            gameObject.BaseId == RouletteDreamBaseId &&
+            TreasureMapDefinitions.RouletteDreamBaseIds.Contains(gameObject.BaseId) &&
             gameObject.IsTargetable &&
             !rouletteInteractedEntities.Contains(gameObject.EntityId));
         if (dream != null)
@@ -3533,7 +3692,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         // 已交互过的潜网巡梦仍可能继续留在对象表中；只要它还在场，就禁止退出。
-        if (objectTable.Any(gameObject => gameObject.BaseId == RouletteDreamBaseId))
+        if (objectTable.Any(gameObject => TreasureMapDefinitions.RouletteDreamBaseIds.Contains(gameObject.BaseId)))
         {
             if (rouletteTargetKind == "退出点")
             {
@@ -3541,7 +3700,7 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             ResetRouletteTarget();
-            AutoTreasureHuntStatus = $"转盘：场上仍存在潜网巡梦（BaseId {RouletteDreamBaseId}），禁止执行退出逻辑。";
+            AutoTreasureHuntStatus = $"转盘：场上仍存在潜网巡梦（BaseId {string.Join(", ", TreasureMapDefinitions.RouletteDreamBaseIds)}），禁止执行退出逻辑。";
             return;
         }
 
@@ -3571,11 +3730,11 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (objectTable.Any(gameObject => gameObject.BaseId == RouletteDreamBaseId))
+        if (objectTable.Any(gameObject => TreasureMapDefinitions.RouletteDreamBaseIds.Contains(gameObject.BaseId)))
         {
             commandManager.ProcessCommand("/vnav stop");
             ResetRouletteTarget();
-            TeleportTestStatus = $"场上仍存在潜网巡梦（BaseId {RouletteDreamBaseId}），测试退出已被阻止。";
+            TeleportTestStatus = $"场上仍存在潜网巡梦（BaseId {string.Join(", ", TreasureMapDefinitions.RouletteDreamBaseIds)}），测试退出已被阻止。";
             return;
         }
 
@@ -3823,6 +3982,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         TreasureMapUseStatus = "正在请求游戏使用地图...";
+        activeTreasureMapRoute = SelectedTreasureMapRoute;
         selectMapPending = false;
         confirmMapPending = false;
         _ = framework.RunOnFrameworkThread(UseTreasureMapOnFrameworkThread);
@@ -3905,7 +4065,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnInventoryChanged(IReadOnlyCollection<InventoryEventArgs> events)
     {
-        if (!IsHeadLogicSelected || !IsAutoTreasureHuntEnabled || IsRouletteMode)
+        if (!IsHeadLogicSelected || !IsAutoTreasureHuntEnabled || IsRouletteMode || doorSelectionModeActive)
         {
             return;
         }
@@ -3924,6 +4084,7 @@ public sealed class Plugin : IDalamudPlugin
         if (!IsHeadLogicSelected ||
             !IsAutoTreasureHuntEnabled ||
             IsRouletteMode ||
+            doorSelectionModeActive ||
             !autoWaitingForTaskTreasureMap)
         {
             return;
@@ -4130,196 +4291,6 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         return false;
-    }
-
-    private unsafe bool TryMoveSelectedMapFromSaddlebagToMainInventory(out int moveResult)
-    {
-        moveResult = -1;
-        if (emergencyStopActive)
-        {
-            SaddlebagMoveStatus = "已紧急停止鞍囊操作。";
-            return false;
-        }
-
-        var inventoryManager = InventoryManager.Instance();
-        if (inventoryManager == null)
-        {
-            SaddlebagMoveStatus = "无法获取游戏库存管理器。";
-            return false;
-        }
-
-        if (!EnsureSaddlebagLoaded(inventoryManager))
-        {
-            return false;
-        }
-
-        InventoryType sourceType = default;
-        ushort sourceSlot = 0;
-        var sourceFound = false;
-        foreach (var inventoryType in SaddlebagClientInventoryTypes)
-        {
-            var container = inventoryManager->GetInventoryContainer(inventoryType);
-            if (container == null || !container->IsLoaded)
-            {
-                continue;
-            }
-
-            for (var slot = 0; slot < container->Size; slot++)
-            {
-                var item = container->GetInventorySlot(slot);
-                if (item != null && item->GetBaseItemId() == SelectedTreasureMapItemId)
-                {
-                    sourceType = inventoryType;
-                    sourceSlot = (ushort)slot;
-                    sourceFound = true;
-                    break;
-                }
-            }
-
-            if (sourceFound)
-            {
-                break;
-            }
-        }
-
-        if (!sourceFound)
-        {
-            SaddlebagMoveStatus = $"陆行鸟鞍囊中没有{SelectedTreasureMapName}，或鞍囊尚未加载。";
-            return false;
-        }
-
-        InventoryType destinationType = default;
-        ushort destinationSlot = 0;
-        var destinationFound = false;
-        foreach (var inventoryType in MainClientInventoryTypes)
-        {
-            var container = inventoryManager->GetInventoryContainer(inventoryType);
-            if (container == null || !container->IsLoaded)
-            {
-                continue;
-            }
-
-            for (var slot = 0; slot < container->Size; slot++)
-            {
-                var item = container->GetInventorySlot(slot);
-                if (item != null && item->ItemId == 0)
-                {
-                    destinationType = inventoryType;
-                    destinationSlot = (ushort)slot;
-                    destinationFound = true;
-                    break;
-                }
-            }
-
-            if (destinationFound)
-            {
-                break;
-            }
-        }
-
-        if (!destinationFound)
-        {
-            SaddlebagMoveStatus = "主背包没有空槽，无法取出陆行鸟鞍囊地图。";
-            return false;
-        }
-
-        moveResult = 0;
-        return TryOpenSelectedMapInventoryContextMenu(fromSaddlebag: true);
-    }
-
-    private unsafe bool TryMoveSelectedMapFromMainInventoryToSaddlebag(out int moveResult)
-    {
-        moveResult = -1;
-        if (emergencyStopActive)
-        {
-            SaddlebagMoveStatus = "已紧急停止鞍囊操作。";
-            return false;
-        }
-
-        var inventoryManager = InventoryManager.Instance();
-        if (inventoryManager == null)
-        {
-            SaddlebagMoveStatus = "无法获取游戏库存管理器。";
-            return false;
-        }
-
-        if (!EnsureSaddlebagLoaded(inventoryManager))
-        {
-            return false;
-        }
-
-        InventoryType sourceType = default;
-        ushort sourceSlot = 0;
-        var sourceFound = false;
-        foreach (var inventoryType in MainClientInventoryTypes)
-        {
-            var container = inventoryManager->GetInventoryContainer(inventoryType);
-            if (container == null || !container->IsLoaded)
-            {
-                continue;
-            }
-
-            for (var slot = 0; slot < container->Size; slot++)
-            {
-                var item = container->GetInventorySlot(slot);
-                if (item != null && item->GetBaseItemId() == SelectedTreasureMapItemId)
-                {
-                    sourceType = inventoryType;
-                    sourceSlot = (ushort)slot;
-                    sourceFound = true;
-                    break;
-                }
-            }
-
-            if (sourceFound)
-            {
-                break;
-            }
-        }
-
-        if (!sourceFound)
-        {
-            SaddlebagMoveStatus = $"主背包中没有{SelectedTreasureMapName}。";
-            return false;
-        }
-
-        InventoryType destinationType = default;
-        ushort destinationSlot = 0;
-        var destinationFound = false;
-        foreach (var inventoryType in SaddlebagClientInventoryTypes)
-        {
-            var container = inventoryManager->GetInventoryContainer(inventoryType);
-            if (container == null || !container->IsLoaded)
-            {
-                continue;
-            }
-
-            for (var slot = 0; slot < container->Size; slot++)
-            {
-                var item = container->GetInventorySlot(slot);
-                if (item != null && item->ItemId == 0)
-                {
-                    destinationType = inventoryType;
-                    destinationSlot = (ushort)slot;
-                    destinationFound = true;
-                    break;
-                }
-            }
-
-            if (destinationFound)
-            {
-                break;
-            }
-        }
-
-        if (!destinationFound)
-        {
-            SaddlebagMoveStatus = "陆行鸟鞍囊没有已加载的空槽，无法存入第 2 张地图。";
-            return false;
-        }
-
-        moveResult = 0;
-        return TryOpenSelectedMapInventoryContextMenu(fromSaddlebag: false);
     }
 
     private unsafe bool EnsureSaddlebagLoaded(InventoryManager* inventoryManager)
@@ -4694,7 +4665,12 @@ public sealed class Plugin : IDalamudPlugin
             delay: TimeSpan.FromSeconds(3));
     }
 
-    private unsafe bool TrySendPartyFlag()
+    private bool TrySendPartyFlag()
+    {
+        return TrySendChatBoxEntry("/p <flag>");
+    }
+
+    private unsafe bool TrySendChatBoxEntry(string command)
     {
         var uiModule = UIModule.Instance();
         if (uiModule == null)
@@ -4702,7 +4678,7 @@ public sealed class Plugin : IDalamudPlugin
             return false;
         }
 
-        var message = GameUtf8String.FromSequence(Encoding.UTF8.GetBytes("/p <flag>"));
+        var message = GameUtf8String.FromSequence(Encoding.UTF8.GetBytes(command));
         if (message == null)
         {
             return false;
@@ -5385,6 +5361,17 @@ public sealed class Plugin : IDalamudPlugin
                 RefreshTreasureMapCounts();
                 if (!HasTaskTreasureMap)
                 {
+                    // 没有传送魔纹不等于藏宝图任务已结算。狞豹革等选门地图在
+                    // 第二次开箱后可能直接结束本轮；必须等待卫月任务事件状态解除，
+                    // 避免仍在任务内就开始解读下一张地图。
+                    if (condition[ConditionFlag.OccupiedInQuestEvent])
+                    {
+                        treasurePortalSearchDeadline = DateTime.UtcNow.AddSeconds(1);
+                        AutoTreasureHuntStatus = "本次挖宝未出现传送魔纹，仍在藏宝图任务事件中，等待任务结算后再继续。";
+                        TeleportTestStatus = AutoTreasureHuntStatus;
+                        return;
+                    }
+
                     treasurePortalPending = false;
                     treasurePortalEntityId = 0;
                     treasurePortalCloseDelayStarted = false;
@@ -5558,6 +5545,8 @@ public sealed class Plugin : IDalamudPlugin
         {
             return;
         }
+
+        activeTreasureMapRoute = SelectedTreasureMapRoute;
 
         // 卫月显性任务状态：上一张藏宝图任务尚未完全结算时，不调用解读技能。
         if (condition[ConditionFlag.OccupiedInQuestEvent])

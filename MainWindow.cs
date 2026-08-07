@@ -201,6 +201,17 @@ public sealed class MainWindow
         {
             plugin.EmergencyStop();
         }
+        ImGui.SameLine();
+        if (ImGui.Button("测试遍历可交互物体"))
+        {
+            plugin.TestListInteractableObjects();
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("测试遍历不可右键选中物体"))
+        {
+            plugin.TestListNonTargetableObjects();
+        }
+        ImGui.TextWrapped(plugin.InteractableObjectScanStatus);
 
         ImGui.Separator();
         if (!plugin.IsHeadLogicSelected)
@@ -245,6 +256,8 @@ public sealed class MainWindow
     {
         ImGui.Indent();
         ImGui.Text(plugin.SelectedTreasureMapName);
+        ImGui.SameLine();
+        ImGui.TextDisabled($"（{plugin.SelectedTreasureMapRouteName}）");
         ImGui.SameLine(330);
         ImGui.TextColored(
             plugin.HasTreasureMap ? RunningColor : StoppedColor,
