@@ -1,12 +1,12 @@
 [
   {
     "Author": "Cino",
-    "Name": "自动挖宝",
+    "Name": "海豹助手",
     "InternalName": "AutoTreasureHunt",
     "AssemblyVersion": "1.0.3.7",
     "TestingAssemblyVersion": null,
     "Description": "自动处理藏宝图、补图、传送和寻路流程。",
-    "Punchline": "自动挖宝助手",
+    "Punchline": "处理一些琐事",
     "ApplicableVersion": "any",
     "DalamudApiLevel": 15,
     "IsHide": false,

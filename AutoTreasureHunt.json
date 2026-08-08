@@ -1,15 +1,15 @@
 {
   "Author": "Cino",
-  "Name": "自动挖宝",
-  "Punchline": "自动挖宝助手",
+  "Name": "海豹助手",
+  "Punchline": "处理一些琐事",
   "Description": "自动处理藏宝图、补图、传送和寻路流程。",
   "InternalName": "AutoTreasureHunt",
   "AssemblyVersion": "1.0.3.7",
   "ApplicableVersion": "any",
   "Tags": [
-    "treasure",
-    "automation",
-    "navigation"
+    "挖宝",
+    "自动",
+    "Dig"
   ],
   "RepoUrl": "https://github.com/Lulimmm/Cino",
   "IconUrl": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/icon-v1.png",
