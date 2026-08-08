@@ -5,6 +5,7 @@ using Dalamud.Game.Inventory.InventoryEventArgTypes;
 using Dalamud.Game.ClientState.Aetherytes;
 using Dalamud.Game.ClientState;
 using Dalamud.Game.ClientState.Conditions;
+using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
@@ -692,6 +693,12 @@ public sealed class Plugin : IDalamudPlugin
 
         if (doorSelectionModeActive)
         {
+            return;
+        }
+
+        if (condition[ConditionFlag.OccupiedInQuestEvent])
+        {
+            AutoTreasureHuntStatus = "当前仍处于藏宝图任务事件中，等待任务结算后再解读下一张地图或进入补图。";
             return;
         }
 
@@ -2005,6 +2012,14 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        if (condition[ConditionFlag.OccupiedInQuestEvent])
+        {
+            automaticMapSupplementTriggered = false;
+            TeleportTestStatus = "当前仍处于藏宝图任务事件中，任务结算前不会进入补图逻辑。";
+            AutoTreasureHuntStatus = TeleportTestStatus;
+            return;
+        }
+
         marketSubmittedListingIds.Clear();
         RefreshTreasureMapCounts();
         if (MainInventoryTreasureMapCount > 0 || SaddlebagTreasureMapCount > 0 || TaskTreasureMapCount > 0)
@@ -2471,6 +2486,11 @@ public sealed class Plugin : IDalamudPlugin
 
         if (treasureChestPending && treasureChestEntityId != 0)
         {
+            if (!confirmNextTreasureChestInteraction && TryGetPartyMemberInCombat(out _))
+            {
+                return string.Empty;
+            }
+
             var chest = objectTable.FirstOrDefault(gameObject => gameObject.EntityId == treasureChestEntityId);
             var distance = confirmNextTreasureChestInteraction ? 3f : 1f;
             if (chest != null &&
@@ -2650,6 +2670,11 @@ public sealed class Plugin : IDalamudPlugin
 
         if (treasureChestPending && !condition[ConditionFlag.InCombat])
         {
+            if (!confirmNextTreasureChestInteraction && TryGetPartyMemberInCombat(out _))
+            {
+                return string.Empty;
+            }
+
             timeout = TimeSpan.FromSeconds(90);
             return $"chest:{treasureChestEntityId}:{chestPositionSampleValid}";
         }
@@ -3218,6 +3243,12 @@ public sealed class Plugin : IDalamudPlugin
             wheelLastMapLink == null ||
             emergencyStopActive)
         {
+            return;
+        }
+
+        if (!wheelTeleportAcceptSubmitted)
+        {
+            AutoTreasureHuntStatus = "车轮：已获取新红旗，等待接受传送邀请后再进行寻路。";
             return;
         }
 
@@ -5720,6 +5751,15 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        if (!confirmNextTreasureChestInteraction && TryGetPartyMemberInCombat(out var partyMemberName))
+        {
+            commandManager.ProcessCommand("/vnav stop");
+            chestPositionSampleValid = false;
+            TeleportTestStatus = $"队友 {partyMemberName} 仍处于战斗状态，暂停战斗后的第二次开箱。";
+            AutoTreasureHuntStatus = TeleportTestStatus;
+            return;
+        }
+
         var chest = treasureChestEntityId == 0
             ? objectTable.FirstOrDefault(IsTreasureChest)
             : objectTable.FirstOrDefault(gameObject => gameObject.EntityId == treasureChestEntityId);
@@ -5803,6 +5843,35 @@ public sealed class Plugin : IDalamudPlugin
         InteractWithTreasureChest(chest);
     }
 
+    private bool TryGetPartyMemberInCombat(out string partyMemberName)
+    {
+        partyMemberName = string.Empty;
+        var localPlayerEntityId = objectTable.LocalPlayer?.EntityId ?? 0;
+        foreach (var member in partyList)
+        {
+            if (member.EntityId == 0 || member.EntityId == localPlayerEntityId)
+            {
+                continue;
+            }
+
+            if (member.GameObject is not Dalamud.Game.ClientState.Objects.Types.ICharacter character ||
+                (character.StatusFlags & StatusFlags.InCombat) == 0)
+            {
+                continue;
+            }
+
+            partyMemberName = member.Name.TextValue;
+            if (string.IsNullOrWhiteSpace(partyMemberName))
+            {
+                partyMemberName = member.EntityId.ToString();
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
     private unsafe void InteractWithTreasureChest(object chest)
     {
         if (chest is not Dalamud.Game.ClientState.Objects.Types.IGameObject gameObject)
@@ -5852,6 +5921,14 @@ public sealed class Plugin : IDalamudPlugin
                 DateTime.UtcNow >= treasurePortalSearchDeadline)
             {
                 RefreshTreasureMapCounts();
+                if (condition[ConditionFlag.OccupiedInQuestEvent] && HasTreasureMap)
+                {
+                    treasurePortalSearchDeadline = DateTime.UtcNow.AddSeconds(1);
+                    AutoTreasureHuntStatus = "第二次开箱后未出现传送魔纹，仍处于藏宝图任务事件且还有备用地图；等待任务结算后再解读下一张地图。";
+                    TeleportTestStatus = AutoTreasureHuntStatus;
+                    return;
+                }
+
                 if (!HasTaskTreasureMap)
                 {
                     // 没有传送魔纹不等于藏宝图任务已结算。狞豹革等选门地图在

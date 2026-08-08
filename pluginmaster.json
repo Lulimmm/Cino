@@ -8,6 +8,10 @@
     "Description": "自动处理藏宝图、补图、传送和寻路流程。",
     "Punchline": "处理一些琐事",
     "ApplicableVersion": "any",
+    "Tags": [
+      "挖宝",
+      "自动"
+    ],
     "DalamudApiLevel": 15,
     "IsHide": false,
     "IsTestingExclusive": false,
