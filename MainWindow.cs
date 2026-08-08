@@ -36,13 +36,13 @@ public sealed class MainWindow
         }
 
         ImGui.SetNextWindowSize(new Vector2(560, 500), ImGuiCond.FirstUseEver);
-        if (!ImGui.Begin("挖宝助手###AutoTreasureHuntMainWindow", ref isOpen))
+        if (!ImGui.Begin("海豹助手###AutoTreasureHuntMainWindow", ref isOpen))
         {
             ImGui.End();
             return;
         }
 
-        ImGui.Text("挖宝助手");
+        ImGui.Text("海豹助手");
         ImGui.Separator();
         ImGui.Spacing();
 
