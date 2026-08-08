@@ -1,0 +1,4 @@
+C:\Users\admin\Desktop\ACR\自动挖宝\dist\AutoTreasureHunt\AutoTreasureHunt.json
+C:\Users\admin\Desktop\ACR\自动挖宝\dist\AutoTreasureHunt\AutoTreasureHunt.dll
+C:\Users\admin\Desktop\ACR\自动挖宝\dist\AutoTreasureHunt\AutoTreasureHunt.deps.json
+C:\Users\admin\Desktop\ACR\自动挖宝\dist\AutoTreasureHunt\AutoTreasureHunt.pdb

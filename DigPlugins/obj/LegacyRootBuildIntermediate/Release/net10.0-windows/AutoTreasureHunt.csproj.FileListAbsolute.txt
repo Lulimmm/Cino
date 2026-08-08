@@ -1,0 +1,14 @@
+C:\Users\admin\Desktop\ACR\自动挖宝\bin\Release\net10.0-windows\AutoTreasureHunt.json
+C:\Users\admin\Desktop\ACR\自动挖宝\bin\Release\net10.0-windows\AutoTreasureHunt.deps.json
+C:\Users\admin\Desktop\ACR\自动挖宝\bin\Release\net10.0-windows\AutoTreasureHunt.dll
+C:\Users\admin\Desktop\ACR\自动挖宝\bin\Release\net10.0-windows\AutoTreasureHunt.pdb
+C:\Users\admin\Desktop\ACR\自动挖宝\obj\Release\net10.0-windows\AutoTreasureHunt.csproj.AssemblyReference.cache
+C:\Users\admin\Desktop\ACR\自动挖宝\obj\Release\net10.0-windows\AutoTreasureHunt.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\admin\Desktop\ACR\自动挖宝\obj\Release\net10.0-windows\AutoTreasureHunt.AssemblyInfoInputs.cache
+C:\Users\admin\Desktop\ACR\自动挖宝\obj\Release\net10.0-windows\AutoTreasureHunt.AssemblyInfo.cs
+C:\Users\admin\Desktop\ACR\自动挖宝\obj\Release\net10.0-windows\AutoTreasureHunt.csproj.CoreCompileInputs.cache
+C:\Users\admin\Desktop\ACR\自动挖宝\obj\Release\net10.0-windows\AutoTreasureHunt.sourcelink.json
+C:\Users\admin\Desktop\ACR\自动挖宝\obj\Release\net10.0-windows\AutoTreasureHunt.dll
+C:\Users\admin\Desktop\ACR\自动挖宝\obj\Release\net10.0-windows\refint\AutoTreasureHunt.dll
+C:\Users\admin\Desktop\ACR\自动挖宝\obj\Release\net10.0-windows\AutoTreasureHunt.pdb
+C:\Users\admin\Desktop\ACR\自动挖宝\obj\Release\net10.0-windows\ref\AutoTreasureHunt.dll
