@@ -6,6 +6,7 @@ using Dalamud.Game.ClientState.Aetherytes;
 using Dalamud.Game.ClientState;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Enums;
+using Dalamud.Game.Text;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
@@ -57,6 +58,7 @@ public sealed class Plugin : IDalamudPlugin
     private const string VnavmeshInternalName = "vnavmesh";
     private const string GlobetrotterInternalName = "globetrotter";
     private const string BossModRebornInternalName = "BossModReborn";
+    private const string AeAssistInternalName = "AEAssist";
     private const uint DecipherGeneralActionId = 19;
     private const uint MountRouletteGeneralActionId = 9;
     private const uint DismountGeneralActionId = 23;
@@ -3079,7 +3081,9 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnChatMessage(IChatMessage message)
     {
-        if (!IsWheelLogicSelected || emergencyStopActive)
+        if (!IsWheelLogicSelected ||
+            emergencyStopActive ||
+            message.LogKind is not (XivChatType.Party or XivChatType.CrossParty))
         {
             return;
         }
@@ -3573,6 +3577,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         commandManager.ProcessCommand("/vnav stop");
+        EnableAeAssistForTreasureInstance();
         UnloadOptimizedInteraction();
         CloseMarketBoardWindows();
         CloseSaddlebagWindow();
@@ -3636,6 +3641,7 @@ public sealed class Plugin : IDalamudPlugin
         doorSelectionWasInCombat = false;
         ResetDoorSelectionChestState(resetCompleted: true);
         commandManager.ProcessCommand("/vnav stop");
+        EnableAeAssistForTreasureInstance();
         commandManager.ProcessCommand("/bmrai off");
         UnloadOptimizedInteraction();
         CloseWorkflowBlockingWindows();
@@ -3676,6 +3682,26 @@ public sealed class Plugin : IDalamudPlugin
         ResetMarketPurchase();
         AutoTreasureHuntStatus = $"选门：已进入副本地图 {doorSelectionInstanceMapId}，已屏蔽其他自动流程，等待任务开始屏障消失。";
         TeleportTestStatus = AutoTreasureHuntStatus;
+    }
+
+    private void EnableAeAssistForTreasureInstance()
+    {
+        if (!CheckAeAssistRunning())
+        {
+            return;
+        }
+
+        commandManager.ProcessCommand("/aeTargetSelector on");
+        commandManager.ProcessCommand("/aeTargetSelector mode6");
+        commandManager.ProcessCommand("/aepull on");
+    }
+
+    private void DisableAeAssistPull()
+    {
+        if (CheckAeAssistRunning())
+        {
+            commandManager.ProcessCommand("/aepull off");
+        }
     }
 
     private void TryHandleDoorSelectionMode()
@@ -3937,6 +3963,7 @@ public sealed class Plugin : IDalamudPlugin
         doorSelectionPortalEntryPending = false;
         commandManager.ProcessCommand("/vnav stop");
         commandManager.ProcessCommand("/bmrai off");
+        DisableAeAssistPull();
         doorSelectionWasInCombat = false;
         ResetDoorSelectionChestState(resetCompleted: true);
         if (!IsAutoTreasureHuntEnabled || emergencyStopActive)
@@ -3976,6 +4003,7 @@ public sealed class Plugin : IDalamudPlugin
         rouletteInteractedEntities.Clear();
         rouletteInteractedChestEntities.Clear();
         rouletteChestDisappearDeadline = default;
+        DisableAeAssistPull();
 
         if (shouldResumeAutoHunt)
         {
@@ -4456,6 +4484,11 @@ public sealed class Plugin : IDalamudPlugin
     private bool CheckBossModRebornRunning()
     {
         return IsPluginRunning(BossModRebornInternalName);
+    }
+
+    private bool CheckAeAssistRunning()
+    {
+        return IsPluginRunning(AeAssistInternalName);
     }
 
     private bool IsPluginRunning(string internalName)
