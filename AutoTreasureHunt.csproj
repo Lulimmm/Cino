@@ -45,8 +45,4 @@
     </Reference>
   </ItemGroup>
 
-  <ItemGroup>
-    <None Include="AutoTreasureHunt.json" CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
-
 </Project>
