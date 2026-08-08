@@ -48,4 +48,16 @@ internal static class TreasureMapDefinitions
     [
         2014790,
     ];
+
+    // 【选门副本地图 ID】进入这些地图后启用选门独占逻辑；后续适配新副本时追加地图 ID。
+    internal static readonly List<uint> DoorSelectionInstanceMapIds =
+    [
+        896,
+    ];
+
+    // 【选门初始宝箱 BaseID】任务开始屏障消失后，前往并交互这些宝箱。
+    internal static readonly List<uint> DoorSelectionInitialChestBaseIds =
+    [
+        2013860,
+    ];
 }

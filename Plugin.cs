@@ -114,6 +114,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly IDataManager dataManager;
     private readonly IClientState clientState;
     private readonly ICondition condition;
+    private readonly IDutyState dutyState;
+    private readonly IPartyList partyList;
     private readonly ICommandManager commandManager;
     private readonly IObjectTable objectTable;
     private readonly ITargetManager targetManager;
@@ -169,6 +171,7 @@ public sealed class Plugin : IDalamudPlugin
     private float headPendingFlagX;
     private float headPendingFlagY;
     private DateTime headFlagAnnouncementDeadline;
+    private DateTime headFlagPartyReadyAt;
     private bool hasAnnouncedFlag;
     private uint lastAnnouncedFlagTerritoryId;
     private uint lastAnnouncedFlagMapId;
@@ -198,6 +201,19 @@ public sealed class Plugin : IDalamudPlugin
     private bool doorSelectionPortalEntryPending;
     private bool doorSelectionModeActive;
     private uint doorSelectionInstanceMapId;
+    private ulong doorSelectionChestEntityId;
+    private bool doorSelectionChestMoveIssued;
+    private bool doorSelectionChestPositionSampleValid;
+    private float doorSelectionChestSampleX;
+    private float doorSelectionChestSampleY;
+    private float doorSelectionChestSampleZ;
+    private DateTime doorSelectionChestPositionStableSince;
+    private bool confirmDoorSelectionChestPending;
+    private DateTime doorSelectionChestConfirmDeadline;
+    private bool doorSelectionInitialChestCompleted;
+    private bool doorSelectionPostCombatChestPending;
+    private DateTime doorSelectionDutyReadyAt;
+    private bool doorSelectionWasInCombat;
     private int decipherRetryCount;
     private bool decipherRetryQueued;
     private bool questDecipherRetryQueued;
@@ -301,6 +317,8 @@ public sealed class Plugin : IDalamudPlugin
         IDataManager dataManager,
         IClientState clientState,
         ICondition condition,
+        IDutyState dutyState,
+        IPartyList partyList,
         ICommandManager commandManager,
         IObjectTable objectTable,
         ITargetManager targetManager)
@@ -314,6 +332,8 @@ public sealed class Plugin : IDalamudPlugin
         this.dataManager = dataManager;
         this.clientState = clientState;
         this.condition = condition;
+        this.dutyState = dutyState;
+        this.partyList = partyList;
         this.commandManager = commandManager;
         this.objectTable = objectTable;
         this.targetManager = targetManager;
@@ -392,6 +412,8 @@ public sealed class Plugin : IDalamudPlugin
     public string SaddlebagMoveStatus { get; private set; } = "尚未测试取出鞍囊地图。";
 
     public string InteractableObjectScanStatus { get; private set; } = "尚未遍历可交互物体。";
+
+    public string BaseIdNavigationTestStatus { get; private set; } = "尚未测试按 BaseID 坐标寻路。";
 
     public bool IsAutoMapSupplementEnabled => configuration.AutoMapSupplementEnabled;
 
@@ -500,6 +522,11 @@ public sealed class Plugin : IDalamudPlugin
                 ExitRouletteMode();
             }
 
+            if (doorSelectionModeActive)
+            {
+                ExitDoorSelectionMode();
+            }
+
             commandManager.ProcessCommand("/vnav stop");
             commandManager.ProcessCommand("/bmrai off");
             wheelWasInCombat = false;
@@ -514,6 +541,7 @@ public sealed class Plugin : IDalamudPlugin
             headFlagTeleportPending = false;
             headFlagTeleportReady = false;
             headFlagAnnouncementPending = false;
+            headFlagPartyReadyAt = default;
             autoWaitingForSaddlebagMove = false;
             autoSaddlebagContextMenuPending = false;
             autoSaddlebagMoveRequested = false;
@@ -651,8 +679,18 @@ public sealed class Plugin : IDalamudPlugin
         if (!IsHeadLogicSelected ||
             !IsAutoTreasureHuntEnabled ||
             IsRouletteMode ||
-            doorSelectionModeActive ||
             automaticMapSupplementRunning)
+        {
+            return;
+        }
+
+        if (TreasureMapDefinitions.DoorSelectionInstanceMapIds.Contains(clientState.MapId))
+        {
+            EnterDoorSelectionMode();
+            return;
+        }
+
+        if (doorSelectionModeActive)
         {
             return;
         }
@@ -962,6 +1000,7 @@ public sealed class Plugin : IDalamudPlugin
         headFlagTeleportPending = false;
         headFlagTeleportReady = false;
         headFlagAnnouncementPending = false;
+        headFlagPartyReadyAt = default;
         decipherRetryCount = 0;
         decipherRetryQueued = false;
         digRetryCount = 0;
@@ -1082,6 +1121,47 @@ public sealed class Plugin : IDalamudPlugin
     public void TestListNonTargetableObjects()
     {
         TestListObjects(targetable: false, "不可右键选中物体");
+    }
+
+    public void TestNavigateToBaseId(string baseIdText)
+    {
+        ResumeAfterEmergencyStop();
+        if (!uint.TryParse(baseIdText.Trim(), out var baseId) || baseId == 0)
+        {
+            BaseIdNavigationTestStatus = "BaseID 必须是大于 0 的整数。";
+            return;
+        }
+
+        BaseIdNavigationTestStatus = $"正在从卫月对象表查找 BaseID {baseId}。";
+        _ = framework.RunOnFrameworkThread(() =>
+        {
+            var localPlayer = objectTable.LocalPlayer;
+            if (localPlayer == null)
+            {
+                BaseIdNavigationTestStatus = "卫月对象表暂时无法取得角色对象。";
+                return;
+            }
+
+            var target = objectTable
+                .Where(gameObject => gameObject.BaseId == baseId && gameObject.EntityId != 0)
+                .OrderBy(gameObject =>
+                    System.Numerics.Vector3.DistanceSquared(localPlayer.Position, gameObject.Position))
+                .FirstOrDefault();
+            if (target == null)
+            {
+                BaseIdNavigationTestStatus = $"当前对象表中没有实体存在的 BaseID {baseId}。";
+                return;
+            }
+
+            var position = target.Position;
+            var command = FormattableString.Invariant(
+                $"/vnav moveto {position.X:F3} {position.Y:F3} {position.Z:F3}");
+            targetManager.Target = target;
+            var accepted = commandManager.ProcessCommand(command);
+            BaseIdNavigationTestStatus = accepted
+                ? $"已找到 BaseID {baseId}（Entity ID {target.EntityId}），XYZ：{position.X:F3}, {position.Y:F3}, {position.Z:F3}；已执行 {command}。"
+                : $"已找到 BaseID {baseId}，XYZ：{position.X:F3}, {position.Y:F3}, {position.Z:F3}；但命令 {command} 执行失败。";
+        });
     }
 
     private void TestListObjects(bool targetable, string category)
@@ -1220,6 +1300,7 @@ public sealed class Plugin : IDalamudPlugin
         headFlagTeleportPending = false;
         headFlagTeleportReady = false;
         headFlagAnnouncementPending = false;
+        headFlagPartyReadyAt = default;
         saddlebagStoreTestPending = false;
         saddlebagStoreMoveRequested = false;
         saddlebagStoreContextMenuPending = false;
@@ -1258,6 +1339,8 @@ public sealed class Plugin : IDalamudPlugin
         doorSelectionPortalEntryPending = false;
         doorSelectionModeActive = false;
         doorSelectionInstanceMapId = 0;
+        doorSelectionWasInCombat = false;
+        ResetDoorSelectionChestState(resetCompleted: true);
 
         marketBoardAfterTeleportPending = false;
         marketBoardTeleportRetryQueued = false;
@@ -3228,7 +3311,8 @@ public sealed class Plugin : IDalamudPlugin
                 ExitDoorSelectionMode();
             }
 
-            if (doorSelectionPortalEntryPending && CanRunAutomationOrTest)
+            if (TreasureMapDefinitions.DoorSelectionInstanceMapIds.Contains(mapId) &&
+                CanRunAutomationOrTest)
             {
                 EnterDoorSelectionMode();
                 return;
@@ -3266,7 +3350,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (doorSelectionPortalEntryPending)
+        if (TreasureMapDefinitions.DoorSelectionInstanceMapIds.Contains(clientState.MapId))
         {
             EnterDoorSelectionMode();
             return;
@@ -3509,7 +3593,8 @@ public sealed class Plugin : IDalamudPlugin
 
     private void EnterDoorSelectionMode()
     {
-        if (doorSelectionModeActive || activeTreasureMapRoute != TreasureMapRoute.DoorSelection)
+        if (doorSelectionModeActive ||
+            !TreasureMapDefinitions.DoorSelectionInstanceMapIds.Contains(clientState.MapId))
         {
             return;
         }
@@ -3517,22 +3602,296 @@ public sealed class Plugin : IDalamudPlugin
         doorSelectionPortalEntryPending = false;
         doorSelectionModeActive = true;
         doorSelectionInstanceMapId = clientState.MapId;
+        doorSelectionWasInCombat = false;
+        ResetDoorSelectionChestState(resetCompleted: true);
         commandManager.ProcessCommand("/vnav stop");
+        commandManager.ProcessCommand("/bmrai off");
         UnloadOptimizedInteraction();
+        CloseWorkflowBlockingWindows();
+        rouletteModeActive = false;
+        ResetRouletteTarget();
+        automaticMapSupplementRunning = false;
+        automaticMapSupplementTriggered = false;
+        mapSupplementStage = MapSupplementStage.None;
+        mapSupplementActionAt = default;
+        mapSupplementDeadline = default;
+        mapSupplementPurchaseStep = 0;
+        selectMapPending = false;
+        confirmMapPending = false;
+        autoWaitingForTaskTreasureMap = false;
+        autoWaitingForSaddlebagMove = false;
+        autoSaddlebagContextMenuPending = false;
+        autoSaddlebagMoveRequested = false;
+        saddlebagStoreTestPending = false;
+        saddlebagStoreContextMenuPending = false;
+        saddlebagTakeTestPending = false;
+        saddlebagTakeContextMenuPending = false;
         mountAfterTeleportPending = false;
         mountRetryQueued = false;
         dismountAtFlagPending = false;
         treasureChestPending = false;
         confirmTreasureChestPending = false;
+        waitForTreasureCombatStart = false;
+        treasureCombatActive = false;
+        treasureCombatLastCondition = false;
+        treasureCombatEndCandidate = null;
         treasurePortalPending = false;
         confirmTreasurePortalPending = false;
-        AutoTreasureHuntStatus = "选门：已进入选门副本，当前为空逻辑，等待后续适配。";
+        marketBoardAfterTeleportPending = false;
+        marketBoardTeleportRetryQueued = false;
+        marketBoardInteractionPending = false;
+        marketBoardInteractionAttempted = false;
+        marketBoardPositionSampleValid = false;
+        ResetMarketPurchase();
+        AutoTreasureHuntStatus = $"选门：已进入副本地图 {doorSelectionInstanceMapId}，已屏蔽其他自动流程，等待任务开始屏障消失。";
         TeleportTestStatus = AutoTreasureHuntStatus;
     }
 
     private void TryHandleDoorSelectionMode()
     {
-        // 选门副本逻辑预留：当前不执行任何交互、选门或战斗操作。
+        if (!TreasureMapDefinitions.DoorSelectionInstanceMapIds.Contains(clientState.MapId))
+        {
+            ExitDoorSelectionMode();
+            return;
+        }
+
+        if (TryHandleDoorSelectionCombatState())
+        {
+            return;
+        }
+
+        if (doorSelectionInitialChestCompleted && !doorSelectionPostCombatChestPending)
+        {
+            AutoTreasureHuntStatus = "选门：初始宝箱已经确认，等待战斗开始。";
+            return;
+        }
+
+        if (!dutyState.IsDutyStarted)
+        {
+            if (doorSelectionChestMoveIssued)
+            {
+                commandManager.ProcessCommand("/vnav stop");
+                ResetDoorSelectionChestTarget();
+            }
+
+            doorSelectionDutyReadyAt = default;
+            AutoTreasureHuntStatus = "选门：等待任务正式开始及入口屏障消失。";
+            return;
+        }
+
+        if (doorSelectionDutyReadyAt == default)
+        {
+            doorSelectionDutyReadyAt = DateTime.UtcNow.AddSeconds(1);
+            AutoTreasureHuntStatus = "选门：已检测到任务开始，等待入口屏障完全消失。";
+            return;
+        }
+
+        if (DateTime.UtcNow < doorSelectionDutyReadyAt)
+        {
+            return;
+        }
+
+        TryConfirmDoorSelectionChest();
+        if (confirmDoorSelectionChestPending)
+        {
+            return;
+        }
+
+        var chest = objectTable.FirstOrDefault(gameObject =>
+            TreasureMapDefinitions.DoorSelectionInitialChestBaseIds.Contains(gameObject.BaseId));
+        if (chest == null)
+        {
+            commandManager.ProcessCommand("/vnav stop");
+            ResetDoorSelectionChestTarget();
+            AutoTreasureHuntStatus = doorSelectionPostCombatChestPending
+                ? $"选门：战斗已结束，等待再次出现的宝箱（BaseID {string.Join(", ", TreasureMapDefinitions.DoorSelectionInitialChestBaseIds)}）。"
+                : $"选门：任务已开始，等待初始宝箱出现（BaseID {string.Join(", ", TreasureMapDefinitions.DoorSelectionInitialChestBaseIds)}）。";
+            return;
+        }
+
+        if (!chest.IsTargetable)
+        {
+            commandManager.ProcessCommand("/vnav stop");
+            ResetDoorSelectionChestTarget();
+            AutoTreasureHuntStatus = $"选门：已检测到初始宝箱（Entity ID {chest.EntityId}），等待宝箱变为可选中。";
+            return;
+        }
+
+        if (doorSelectionChestEntityId != chest.EntityId)
+        {
+            ResetDoorSelectionChestTarget();
+            doorSelectionChestEntityId = chest.EntityId;
+        }
+
+        if (!doorSelectionChestMoveIssued)
+        {
+            targetManager.Target = chest;
+            var position = chest.Position;
+            var command = FormattableString.Invariant($"/vnav moveto {position.X:F3} {position.Y:F3} {position.Z:F3}");
+            doorSelectionChestMoveIssued = commandManager.ProcessCommand(command);
+            AutoTreasureHuntStatus = doorSelectionChestMoveIssued
+                ? $"选门：已获取初始宝箱坐标 X {position.X:F3}、Y {position.Y:F3}、Z {position.Z:F3}，正在执行 {command}。"
+                : $"选门：初始宝箱坐标已获取，但命令 {command} 执行失败，正在重试。";
+            return;
+        }
+
+        var localPlayer = objectTable.LocalPlayer;
+        if (localPlayer == null)
+        {
+            AutoTreasureHuntStatus = "选门：暂时无法从卫月对象表取得角色坐标。";
+            return;
+        }
+
+        const float interactionDistance = 2.5f;
+        if (System.Numerics.Vector3.DistanceSquared(localPlayer.Position, chest.Position) >
+            interactionDistance * interactionDistance)
+        {
+            doorSelectionChestPositionSampleValid = false;
+            AutoTreasureHuntStatus = doorSelectionPostCombatChestPending
+                ? $"选门：战斗结束后正在再次前往宝箱（Entity ID {chest.EntityId}，BaseID {chest.BaseId}）。"
+                : $"选门：正在前往初始宝箱（Entity ID {chest.EntityId}，BaseID {chest.BaseId}）。";
+            return;
+        }
+
+        const float movementTolerance = 0.05f;
+        var playerPosition = localPlayer.Position;
+        if (!doorSelectionChestPositionSampleValid)
+        {
+            commandManager.ProcessCommand("/vnav stop");
+            doorSelectionChestPositionSampleValid = true;
+            doorSelectionChestSampleX = playerPosition.X;
+            doorSelectionChestSampleY = playerPosition.Y;
+            doorSelectionChestSampleZ = playerPosition.Z;
+            doorSelectionChestPositionStableSince = DateTime.UtcNow;
+            AutoTreasureHuntStatus = "选门：已进入初始宝箱交互范围并停止 /vnav，等待角色稳定。";
+            return;
+        }
+
+        if (MathF.Abs(playerPosition.X - doorSelectionChestSampleX) > movementTolerance ||
+            MathF.Abs(playerPosition.Y - doorSelectionChestSampleY) > movementTolerance ||
+            MathF.Abs(playerPosition.Z - doorSelectionChestSampleZ) > movementTolerance)
+        {
+            doorSelectionChestSampleX = playerPosition.X;
+            doorSelectionChestSampleY = playerPosition.Y;
+            doorSelectionChestSampleZ = playerPosition.Z;
+            doorSelectionChestPositionStableSince = DateTime.UtcNow;
+            AutoTreasureHuntStatus = "选门：已靠近初始宝箱，等待角色停止移动后交互。";
+            return;
+        }
+
+        if (DateTime.UtcNow - doorSelectionChestPositionStableSince < TimeSpan.FromSeconds(1))
+        {
+            return;
+        }
+
+        commandManager.ProcessCommand("/vnav stop");
+        targetManager.Target = chest;
+        if (InteractWithGameObject(chest) == 0)
+        {
+            doorSelectionChestMoveIssued = false;
+            doorSelectionChestPositionSampleValid = false;
+            AutoTreasureHuntStatus = "选门：初始宝箱交互调用失败，正在重新寻路并重试。";
+            return;
+        }
+
+        if (doorSelectionPostCombatChestPending)
+        {
+            doorSelectionPostCombatChestPending = false;
+            doorSelectionInitialChestCompleted = true;
+            ResetDoorSelectionChestTarget();
+            AutoTreasureHuntStatus = "选门：战斗结束后已再次寻路并交互宝箱，等待后续选门流程适配。";
+            TeleportTestStatus = AutoTreasureHuntStatus;
+            return;
+        }
+
+        confirmDoorSelectionChestPending = true;
+        doorSelectionChestConfirmDeadline = DateTime.UtcNow.AddSeconds(10);
+        AutoTreasureHuntStatus = "选门：已与初始宝箱交互，等待确认窗口。";
+    }
+
+    private bool TryHandleDoorSelectionCombatState()
+    {
+        var inCombat = condition[ConditionFlag.InCombat];
+        if (inCombat == doorSelectionWasInCombat)
+        {
+            return false;
+        }
+
+        doorSelectionWasInCombat = inCombat;
+        if (inCombat)
+        {
+            commandManager.ProcessCommand("/bmrai on");
+            AutoTreasureHuntStatus = "选门：已进入战斗并执行 /bmrai on。";
+        }
+        else
+        {
+            commandManager.ProcessCommand("/bmrai off");
+            if (doorSelectionInitialChestCompleted)
+            {
+                doorSelectionInitialChestCompleted = false;
+                doorSelectionPostCombatChestPending = true;
+                ResetDoorSelectionChestTarget();
+            }
+            AutoTreasureHuntStatus = "选门：已脱离战斗并执行 /bmrai off。";
+        }
+
+        TeleportTestStatus = AutoTreasureHuntStatus;
+        return true;
+    }
+
+    private unsafe void TryConfirmDoorSelectionChest()
+    {
+        if (!confirmDoorSelectionChestPending)
+        {
+            return;
+        }
+
+        if (DateTime.UtcNow > doorSelectionChestConfirmDeadline)
+        {
+            confirmDoorSelectionChestPending = false;
+            ResetDoorSelectionChestTarget();
+            AutoTreasureHuntStatus = "选门：等待初始宝箱确认窗口超时，正在重新前往并交互宝箱。";
+            return;
+        }
+
+        var addon = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
+        if (addon == null || !addon->IsReady || !addon->IsVisible)
+        {
+            return;
+        }
+
+        if (addon->FireCallbackInt(0))
+        {
+            confirmDoorSelectionChestPending = false;
+            doorSelectionInitialChestCompleted = true;
+            commandManager.ProcessCommand("/vnav stop");
+            AutoTreasureHuntStatus = "选门：已在初始宝箱确认窗口选择“是”，本阶段完成。";
+            TeleportTestStatus = AutoTreasureHuntStatus;
+        }
+        else
+        {
+            AutoTreasureHuntStatus = "选门：初始宝箱确认回调被拒绝，继续等待重试。";
+        }
+    }
+
+    private void ResetDoorSelectionChestTarget()
+    {
+        doorSelectionChestEntityId = 0;
+        doorSelectionChestMoveIssued = false;
+        doorSelectionChestPositionSampleValid = false;
+    }
+
+    private void ResetDoorSelectionChestState(bool resetCompleted)
+    {
+        ResetDoorSelectionChestTarget();
+        confirmDoorSelectionChestPending = false;
+        doorSelectionChestConfirmDeadline = default;
+        doorSelectionDutyReadyAt = default;
+        doorSelectionPostCombatChestPending = false;
+        if (resetCompleted)
+        {
+            doorSelectionInitialChestCompleted = false;
+        }
     }
 
     private void ExitDoorSelectionMode()
@@ -3545,6 +3904,10 @@ public sealed class Plugin : IDalamudPlugin
         doorSelectionModeActive = false;
         doorSelectionInstanceMapId = 0;
         doorSelectionPortalEntryPending = false;
+        commandManager.ProcessCommand("/vnav stop");
+        commandManager.ProcessCommand("/bmrai off");
+        doorSelectionWasInCombat = false;
+        ResetDoorSelectionChestState(resetCompleted: true);
         if (!IsAutoTreasureHuntEnabled || emergencyStopActive)
         {
             return;
@@ -4542,6 +4905,7 @@ public sealed class Plugin : IDalamudPlugin
         if (headFlagAnnouncementPending)
         {
             headFlagAnnouncementDeadline = DateTime.UtcNow.AddSeconds(30);
+            headFlagPartyReadyAt = default;
             TeleportTestStatus = "车头已请求传送，等待传送完成后发送红旗给车轮。";
             SchedulePendingHeadFlagAnnouncement();
         }
@@ -4551,6 +4915,7 @@ public sealed class Plugin : IDalamudPlugin
         {
             headFlagAnnouncementPending = false;
             headFlagAnnouncementDeadline = default;
+            headFlagPartyReadyAt = default;
             TeleportTestStatus = "游戏拒绝了传送请求，请确认角色当前可以传送。";
             return;
         }
@@ -4607,6 +4972,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         headFlagAnnouncementPending = true;
+        headFlagPartyReadyAt = default;
         headPendingFlagTerritoryId = territoryId;
         headPendingFlagMapId = mapId;
         headPendingFlagX = flagX;
@@ -4628,7 +4994,7 @@ public sealed class Plugin : IDalamudPlugin
             : $"{prefix}：游戏聊天组件暂不可用，已记录该红旗避免重复刷屏。";
     }
 
-    private void SchedulePendingHeadFlagAnnouncement()
+    private void SchedulePendingHeadFlagAnnouncement(TimeSpan? delay = null)
     {
         if (!headFlagAnnouncementPending)
         {
@@ -4649,6 +5015,7 @@ public sealed class Plugin : IDalamudPlugin
                 if (DateTime.UtcNow >= headFlagAnnouncementDeadline)
                 {
                     headFlagAnnouncementPending = false;
+                    headFlagPartyReadyAt = default;
                     TeleportTestStatus = "等待车头传送完成后播报红旗超时，已取消本轮播报。";
                     return;
                 }
@@ -4657,12 +5024,36 @@ public sealed class Plugin : IDalamudPlugin
                     condition[ConditionFlag.BetweenAreas51] ||
                     clientState.MapId != headPendingFlagMapId)
                 {
-                    SchedulePendingHeadFlagAnnouncement();
+                    headFlagPartyReadyAt = default;
+                    SchedulePendingHeadFlagAnnouncement(TimeSpan.FromSeconds(3));
+                    return;
+                }
+
+                if (!TryAreAllPartyMembersReady(out var partyWaitReason))
+                {
+                    headFlagPartyReadyAt = default;
+                    TeleportTestStatus = $"已完成切图，但{partyWaitReason}，暂不发送红旗。";
+                    SchedulePendingHeadFlagAnnouncement(TimeSpan.FromMilliseconds(250));
+                    return;
+                }
+
+                if (headFlagPartyReadyAt == default)
+                {
+                    headFlagPartyReadyAt = DateTime.UtcNow.AddSeconds(2);
+                    TeleportTestStatus = "车头与所有队友已处于同一地图且对象已加载，等待 2 秒后发送红旗。";
+                    SchedulePendingHeadFlagAnnouncement(TimeSpan.FromMilliseconds(250));
+                    return;
+                }
+
+                if (DateTime.UtcNow < headFlagPartyReadyAt)
+                {
+                    SchedulePendingHeadFlagAnnouncement(TimeSpan.FromMilliseconds(250));
                     return;
                 }
 
                 headFlagAnnouncementPending = false;
                 headFlagAnnouncementDeadline = default;
+                headFlagPartyReadyAt = default;
                 AnnounceFlag(
                     headPendingFlagTerritoryId,
                     headPendingFlagMapId,
@@ -4670,7 +5061,58 @@ public sealed class Plugin : IDalamudPlugin
                     headPendingFlagY,
                     isTest: false);
             },
-            delay: TimeSpan.FromSeconds(3));
+            delay: delay ?? TimeSpan.FromSeconds(3));
+    }
+
+    private bool TryAreAllPartyMembersReady(out string reason)
+    {
+        reason = string.Empty;
+        var localPlayer = objectTable.LocalPlayer;
+        if (localPlayer == null)
+        {
+            reason = "暂时无法取得自己的对象";
+            return false;
+        }
+
+        if (partyList.Count == 0)
+        {
+            reason = "队伍列表尚未加载";
+            return false;
+        }
+
+        var currentTerritoryId = clientState.TerritoryType;
+        foreach (var member in partyList)
+        {
+            if (member.EntityId == 0)
+            {
+                reason = "仍有队友实体尚未加载";
+                return false;
+            }
+
+            if (member.Territory.RowId != currentTerritoryId)
+            {
+                reason = "仍有队友未进入当前地图";
+                return false;
+            }
+
+            var memberObject = member.GameObject;
+            if (memberObject == null || !memberObject.IsTargetable)
+            {
+                reason = "仍有队友对象不可选中";
+                return false;
+            }
+        }
+
+        if (!objectTable.Any(gameObject =>
+                gameObject.EntityId != 0 &&
+                gameObject.EntityId != localPlayer.EntityId &&
+                gameObject.IsTargetable))
+        {
+            reason = "当前对象表中还没有其他可选中实体";
+            return false;
+        }
+
+        return true;
     }
 
     private bool TrySendPartyFlag()

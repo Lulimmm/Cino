@@ -15,6 +15,7 @@ public sealed class MainWindow
     private bool isOpen = true;
     private string credentialInput = string.Empty;
     private string credentialStatus = string.Empty;
+    private string navigationBaseIdInput = "2013860";
 
     public MainWindow(Plugin plugin, IDalamudPluginInterface pluginInterface)
     {
@@ -212,6 +213,15 @@ public sealed class MainWindow
             plugin.TestListNonTargetableObjects();
         }
         ImGui.TextWrapped(plugin.InteractableObjectScanStatus);
+
+        ImGui.SetNextItemWidth(180);
+        ImGui.InputText("目标 BaseID###NavigationBaseId", ref navigationBaseIdInput, 16);
+        ImGui.SameLine();
+        if (ImGui.Button("测试按 BaseID 坐标寻路"))
+        {
+            plugin.TestNavigateToBaseId(navigationBaseIdInput);
+        }
+        ImGui.TextWrapped(plugin.BaseIdNavigationTestStatus);
 
         ImGui.Separator();
         if (!plugin.IsHeadLogicSelected)
