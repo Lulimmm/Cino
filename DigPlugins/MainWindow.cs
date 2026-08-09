@@ -224,6 +224,43 @@ public sealed class MainWindow
         ImGui.TextWrapped(plugin.BaseIdNavigationTestStatus);
 
         ImGui.Separator();
+        ImGui.Text("OtherPlugin 测试");
+        var coordinateX = plugin.OtherPluginTestX;
+        var coordinateY = plugin.OtherPluginTestY;
+        var coordinateZ = plugin.OtherPluginTestZ;
+        ImGui.SetNextItemWidth(150);
+        var coordinateChanged = ImGui.InputFloat("X##OtherPlugin", ref coordinateX, 0.1f, 1f, "%.3f");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(150);
+        coordinateChanged |= ImGui.InputFloat("Y##OtherPlugin", ref coordinateY, 0.1f, 1f, "%.3f");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(150);
+        coordinateChanged |= ImGui.InputFloat("Z##OtherPlugin", ref coordinateZ, 0.1f, 1f, "%.3f");
+        if (coordinateChanged)
+        {
+            plugin.SetOtherPluginTestCoordinates(coordinateX, coordinateY, coordinateZ);
+        }
+
+        if (ImGui.Button("读取当前坐标##OtherPlugin"))
+        {
+            plugin.ReadOtherPluginCurrentCoordinate();
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("测试修改自身位置##OtherPlugin"))
+        {
+            plugin.TestOtherPluginApplyCoordinate(coordinateX, coordinateY, coordinateZ);
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("测试打开市场##OtherPlugin"))
+        {
+            plugin.TestOtherPluginOpenMarket();
+        }
+
+        ImGui.TextWrapped(plugin.OtherPluginTestStatus);
+        ImGui.TextWrapped(plugin.OtherPluginMarketStatus);
+        ImGui.TextDisabled("市场测试：可从任意地点打开原生搜索界面；该界面不保证具有服务器购买会话。");
+
+        ImGui.Separator();
         if (!plugin.IsHeadLogicSelected)
         {
             ImGui.TextWrapped("当前选择车轮逻辑。可在此测试聊天地图链接获取红旗；车头测试功能已关闭。");

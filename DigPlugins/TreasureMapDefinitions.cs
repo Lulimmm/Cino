@@ -28,6 +28,7 @@ internal static class TreasureMapDefinitions
     internal static readonly List<TreasureMapOption> RouletteTreasureMapOptions =
     [
         new("陈旧的卡冈图亚革地图", "卡冈图亚草制的宝物地图", MarketSearchName: "陈旧的卡冈图亚革地图", MapItemId: 46185, TaskItemId: 2003785, Route: TreasureMapRoute.Roulette),
+        new("陈旧的蛇牛革地图", "蛇牛革制的宝物地图", MarketSearchName: "陈旧的蛇牛革地图", MapItemId: 39591, TaskItemId: 2003457, Route: TreasureMapRoute.Roulette),
     ];
 
     // 【选门地图】进入副本后进入“选门”空逻辑；新选门藏宝图加在此 List。

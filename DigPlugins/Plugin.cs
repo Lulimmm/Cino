@@ -1,7 +1,9 @@
 using Dalamud.Plugin;
 using Dalamud.Game.Chat;
+using Dalamud.Game.Command;
 using Dalamud.Game.Inventory;
 using Dalamud.Game.Inventory.InventoryEventArgTypes;
+using Dalamud.Game.Network.Structures;
 using Dalamud.Game.ClientState.Aetherytes;
 using Dalamud.Game.ClientState;
 using Dalamud.Game.ClientState.Conditions;
@@ -75,6 +77,7 @@ public sealed class Plugin : IDalamudPlugin
     private static readonly TimeSpan MarketPurchaseActionDelay = TimeSpan.FromSeconds(1);
     private const string UserCredentialHash = "58bc0f328fbfb79b6ebfec309e20974128f9c8e965f9b553cbaf8c28a1f72c61";
     private const string DeveloperCredentialHash = "6b7e18dffccc763c26914ff41a8782c1d60ec9155d86bcefeaef65c75b88b5ec";
+    private const string AdvancedCredentialHash = "b517162f99cbf9966d8e5e412e44f52dbe0f59683c820d8748f544f3c8391818";
     private static readonly GameInventoryType[] MainInventoryTypes =
     [
         GameInventoryType.Inventory1,
@@ -122,7 +125,11 @@ public sealed class Plugin : IDalamudPlugin
     private readonly ICommandManager commandManager;
     private readonly IObjectTable objectTable;
     private readonly ITargetManager targetManager;
+    private readonly IMarketBoard marketBoard;
+    private readonly IPluginLog log;
     private readonly PluginConfiguration configuration;
+    private readonly CoordinateApplier coordinateApplier;
+    private readonly OpenMarketAnywhere openMarketAnywhere;
     private CredentialRole sessionCredentialRole;
     private readonly MainWindow mainWindow;
     private bool selectMapPending;
@@ -294,6 +301,14 @@ public sealed class Plugin : IDalamudPlugin
     private bool optimizedInteractionLoaded;
     private bool emergencyStopActive;
     private bool manualTestModeActive;
+    private bool otherPluginMarketTestActive;
+    private bool otherPluginMarketPurchaseRequestObserved;
+    private DateTime otherPluginMarketSessionOpenedAt;
+    private DateTime otherPluginMarketPurchaseSentAt;
+    private string otherPluginMarketStatus = "尚未测试打开市场。";
+    private uint otherPluginMarketRefreshItemId;
+    private DateTime otherPluginMarketRefreshAt;
+    private int otherPluginMarketRefreshAttempts;
     private readonly Queue<string> interactableObjectEchoQueue = [];
     private int interactableObjectEchoGeneration;
     private int interactableObjectEchoTotal;
@@ -310,7 +325,7 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime movementWatchdogRetryCooldownUntil;
     private readonly HashSet<ulong> rouletteInteractedEntities = [];
 
-    public Plugin(
+    public unsafe Plugin(
         IDalamudPluginInterface pluginInterface,
         IGameInventory gameInventory,
         IGameGui gameGui,
@@ -324,7 +339,9 @@ public sealed class Plugin : IDalamudPlugin
         IPartyList partyList,
         ICommandManager commandManager,
         IObjectTable objectTable,
-        ITargetManager targetManager)
+        ITargetManager targetManager,
+        IMarketBoard marketBoard,
+        IPluginLog log)
     {
         this.pluginInterface = pluginInterface;
         this.gameInventory = gameInventory;
@@ -340,11 +357,16 @@ public sealed class Plugin : IDalamudPlugin
         this.commandManager = commandManager;
         this.objectTable = objectTable;
         this.targetManager = targetManager;
+        this.marketBoard = marketBoard;
+        this.log = log;
         configuration = pluginInterface.GetPluginConfig() as PluginConfiguration ?? new PluginConfiguration();
         if (!Enum.IsDefined(configuration.LogicMode))
         {
             configuration.LogicMode = TreasureHuntLogicMode.Head;
         }
+
+        coordinateApplier = new CoordinateApplier(objectTable, SaveConfiguration);
+        openMarketAnywhere = new OpenMarketAnywhere(framework, gameGui, log);
 
         ValidateSavedCredential();
         mainWindow = new MainWindow(this, this.pluginInterface);
@@ -353,9 +375,19 @@ public sealed class Plugin : IDalamudPlugin
         this.clientState.ZoneInit += OnZoneInit;
         this.clientState.MapIdChanged += OnMapIdChanged;
         this.framework.Update += OnFrameworkUpdate;
+        this.marketBoard.PurchaseRequested += OnOtherPluginMarketPurchaseRequested;
+        this.marketBoard.ItemPurchased += OnOtherPluginMarketItemPurchased;
         this.pluginInterface.ActivePluginsChanged += OnActivePluginsChanged;
         this.pluginInterface.UiBuilder.Draw += mainWindow.Draw;
         this.pluginInterface.UiBuilder.OpenMainUi += mainWindow.Open;
+        commandManager.AddHandler("/lltp", new CommandInfo(OnLltpCommand)
+        {
+            HelpMessage = "测试坐标修改：/lltp x y z",
+        });
+        commandManager.AddHandler("/llmarket", new CommandInfo(OnLlMarketCommand)
+        {
+            HelpMessage = "测试打开市场：/llmarket",
+        });
         _ = this.framework.RunOnTick(
             InitializeRuntimeState,
             delay: TimeSpan.FromSeconds(1));
@@ -369,6 +401,243 @@ public sealed class Plugin : IDalamudPlugin
         RefreshTreasureMapCounts();
     }
 
+    private void ApplyOtherPluginCoordinateOnFrameworkThread(float x, float y, float z)
+    {
+        coordinateApplier.Apply(x, y, z);
+        OtherPluginTestStatus = coordinateApplier.Status;
+    }
+
+    private void OnLltpCommand(string command, string arguments)
+    {
+        if (!EnsureAdvancedCommandAccess())
+        {
+            return;
+        }
+
+        var values = arguments.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (values.Length != 3 ||
+            !TryParseOtherPluginCoordinate(values[0], out var x) ||
+            !TryParseOtherPluginCoordinate(values[1], out var y) ||
+            !TryParseOtherPluginCoordinate(values[2], out var z))
+        {
+            OtherPluginTestStatus = "Usage: /lltp x y z";
+            return;
+        }
+
+        TestOtherPluginApplyCoordinate(x, y, z);
+    }
+
+    private void OnLlMarketCommand(string command, string arguments)
+    {
+        if (!EnsureAdvancedCommandAccess())
+        {
+            return;
+        }
+
+        TestOtherPluginOpenMarket();
+    }
+
+    private unsafe bool IsOtherPluginMarketSessionOpen()
+    {
+        if (!otherPluginMarketTestActive)
+        {
+            return false;
+        }
+
+        var searchAddon = gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
+        if (searchAddon != null && searchAddon->IsReady && searchAddon->IsVisible)
+        {
+            return true;
+        }
+
+        var resultAddon = gameGui.GetAddonByName<AddonItemSearchResult>("ItemSearchResult");
+        if (resultAddon != null && resultAddon->IsReady && resultAddon->IsVisible)
+        {
+            return true;
+        }
+
+        var confirmationAddon = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
+        return confirmationAddon != null && confirmationAddon->IsReady && confirmationAddon->IsVisible;
+    }
+
+    private void RetireOtherPluginMarketSession(string reason)
+    {
+        if (!otherPluginMarketTestActive)
+        {
+            return;
+        }
+
+        log.Information("Released standalone market session: reason={Reason}", reason);
+        otherPluginMarketTestActive = false;
+        otherPluginMarketPurchaseRequestObserved = false;
+        otherPluginMarketRefreshItemId = 0;
+        otherPluginMarketRefreshAttempts = 0;
+    }
+
+    private void OnOtherPluginMarketPurchaseRequested(IMarketBoardPurchaseHandler purchase)
+    {
+        if (!otherPluginMarketTestActive)
+        {
+            return;
+        }
+
+        otherPluginMarketPurchaseRequestObserved = true;
+        otherPluginMarketPurchaseSentAt = DateTime.UtcNow;
+        otherPluginMarketStatus = "游戏原生购买请求已提交，等待服务器结果。";
+        log.Information(
+            "Standalone market native purchase observed: listingId={ListingId}, itemId={ItemId}, quantity={Quantity}, unitPrice={UnitPrice}",
+            purchase.ListingId, purchase.CatalogId, purchase.ItemQuantity, purchase.PricePerUnit);
+    }
+
+    private void OnOtherPluginMarketItemPurchased(IMarketBoardPurchase purchase)
+    {
+        if (!otherPluginMarketTestActive)
+        {
+            return;
+        }
+
+        otherPluginMarketPurchaseRequestObserved = false;
+        otherPluginMarketStatus = $"服务器已确认购买：物品 {purchase.CatalogId}，数量 {purchase.ItemQuantity}。";
+        log.Information(
+            "Standalone market purchase completed through native chain: itemId={ItemId}, quantity={Quantity}",
+            purchase.CatalogId,
+            purchase.ItemQuantity);
+        var purchasedItemId = purchase.CatalogId;
+        _ = framework.RunOnTick(
+            () => BeginOtherPluginMarketResultRefresh(purchasedItemId),
+            delay: TimeSpan.FromMilliseconds(250));
+    }
+
+    private unsafe void BeginOtherPluginMarketResultRefresh(uint itemId)
+    {
+        if (!otherPluginMarketTestActive || itemId == 0)
+        {
+            return;
+        }
+
+        var resultAddon = gameGui.GetAddonByName<AddonItemSearchResult>("ItemSearchResult");
+        if (resultAddon == null || !resultAddon->IsReady || !resultAddon->IsVisible)
+        {
+            // 原生链路已自行关闭或刷新结果页时，不主动把用户带回该页面。
+            otherPluginMarketStatus = $"服务器已确认购买物品 {itemId}；原生结果页已自行结束。";
+            return;
+        }
+
+        log.Information(
+            "Refreshing native market result after purchase: itemId={ItemId}, resultAddonId={AddonId}, blockedParentId={BlockedParentId}, blockingAddons={BlockingAddons}",
+            itemId,
+            resultAddon->Id,
+            resultAddon->BlockedParentId,
+            resultAddon->NumBlockingAddons);
+
+        // 等价于用户点击结果一览页的 X：让游戏先释放该页对 ItemSearch
+        // 的父级阻塞。随后重新点击同一个搜索结果，创建全新的结果页。
+        resultAddon->Close(true);
+        otherPluginMarketRefreshItemId = itemId;
+        otherPluginMarketRefreshAttempts = 0;
+        otherPluginMarketRefreshAt = DateTime.UtcNow.AddMilliseconds(350);
+        otherPluginMarketStatus = $"购买成功；正在关闭旧结果页并重新载入物品 {itemId} 的报价。";
+    }
+
+    private unsafe void TryRefreshOtherPluginMarketResult()
+    {
+        var itemId = otherPluginMarketRefreshItemId;
+        if (itemId == 0 || DateTime.UtcNow < otherPluginMarketRefreshAt)
+        {
+            return;
+        }
+
+        if (!otherPluginMarketTestActive)
+        {
+            otherPluginMarketRefreshItemId = 0;
+            return;
+        }
+
+        if (++otherPluginMarketRefreshAttempts > 40)
+        {
+            otherPluginMarketRefreshItemId = 0;
+            otherPluginMarketStatus = $"购买已成功，但自动重新载入物品 {itemId} 的结果页超时；道具搜索页已恢复，可手动重新选择。";
+            log.Warning("Timed out reopening native market result after purchase: itemId={ItemId}", itemId);
+            return;
+        }
+
+        var oldResultAddon = gameGui.GetAddonByName<AddonItemSearchResult>("ItemSearchResult");
+        if (oldResultAddon != null && oldResultAddon->IsReady && oldResultAddon->IsVisible)
+        {
+            // Close 有过渡帧；在旧窗口真正消失前绝不对父搜索页派发点击。
+            oldResultAddon->Close(true);
+            otherPluginMarketRefreshAt = DateTime.UtcNow.AddMilliseconds(250);
+            return;
+        }
+
+        var searchAddon = gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
+        var agent = AgentItemSearch.Instance();
+        if (searchAddon == null ||
+            !searchAddon->IsReady ||
+            !searchAddon->IsVisible ||
+            searchAddon->ResultsList == null ||
+            agent == null ||
+            !agent->ListingPageLoaded ||
+            agent->ListingPageItemCount == 0)
+        {
+            otherPluginMarketRefreshAt = DateTime.UtcNow.AddMilliseconds(250);
+            return;
+        }
+
+        var resultCount = Math.Min(
+            (int)agent->ListingPageItemCount,
+            searchAddon->ResultsList->GetItemCount());
+        for (var index = 0; index < resultCount; index++)
+        {
+            if (agent->ListingPageItems[index].ItemId != itemId)
+            {
+                continue;
+            }
+
+            searchAddon->ResultsList->SelectItem(index, dispatchEvent: false);
+            searchAddon->ResultsList->DispatchItemEvent(index, AtkEventType.ListItemClick);
+            otherPluginMarketRefreshItemId = 0;
+            otherPluginMarketRefreshAttempts = 0;
+            otherPluginMarketStatus = $"购买成功；已重新载入物品 {itemId} 的结果一览，成交报价应已移除。";
+            log.Information(
+                "Reopened native market result after purchase: itemId={ItemId}, searchIndex={Index}",
+                itemId,
+                index);
+            return;
+        }
+
+        otherPluginMarketRefreshAt = DateTime.UtcNow.AddMilliseconds(250);
+    }
+
+    private bool EnsureAdvancedCommandAccess()
+    {
+        if (HasAdvancedCommandCredential)
+        {
+            return true;
+        }
+
+        const string message = "此命令仅限高级凭证或开发者凭证使用。";
+        OtherPluginTestStatus = message;
+        chatGui.PrintError(message, "海豹助手");
+        return false;
+    }
+
+    private static bool TryParseOtherPluginCoordinate(string text, out float value)
+    {
+        return float.TryParse(
+                   text,
+                   System.Globalization.NumberStyles.Float,
+                   System.Globalization.CultureInfo.InvariantCulture,
+                   out value) ||
+               float.TryParse(
+                   text,
+                   System.Globalization.NumberStyles.Float,
+                   System.Globalization.CultureInfo.CurrentCulture,
+                   out value);
+    }
+
+    private void SaveConfiguration() => pluginInterface.SavePluginConfig(configuration);
+
     public bool IsVnavmeshRunning { get; private set; }
 
     public bool IsGlobetrotterRunning { get; private set; }
@@ -381,11 +650,15 @@ public sealed class Plugin : IDalamudPlugin
 
     public bool HasDeveloperCredential => sessionCredentialRole == CredentialRole.Developer;
 
+    public bool HasAdvancedCommandCredential =>
+        sessionCredentialRole is CredentialRole.Advanced or CredentialRole.Developer;
+
     public bool HasSavedCredential => GetCredentialRole(configuration.CredentialHash) != CredentialRole.None;
 
     public string CredentialRoleName => sessionCredentialRole switch
     {
         CredentialRole.User => "用户凭证",
+        CredentialRole.Advanced => "高级凭证",
         CredentialRole.Developer => "开发者凭证",
         _ => "未验证",
     };
@@ -418,7 +691,59 @@ public sealed class Plugin : IDalamudPlugin
 
     public string BaseIdNavigationTestStatus { get; private set; } = "尚未测试按 BaseID 坐标寻路。";
 
+    public string OtherPluginTestStatus { get; private set; } = "OtherPlugin feature not tested yet.";
+
+    public string OtherPluginMarketStatus => otherPluginMarketStatus;
+
+    public float OtherPluginTestX => configuration.OtherPluginTestX;
+
+    public float OtherPluginTestY => configuration.OtherPluginTestY;
+
+    public float OtherPluginTestZ => configuration.OtherPluginTestZ;
+
     public bool IsAutoMapSupplementEnabled => configuration.AutoMapSupplementEnabled;
+
+    public void SetOtherPluginTestCoordinates(float x, float y, float z)
+    {
+        configuration.OtherPluginTestX = x;
+        configuration.OtherPluginTestY = y;
+        configuration.OtherPluginTestZ = z;
+        SaveConfiguration();
+    }
+
+    public void ReadOtherPluginCurrentCoordinate()
+    {
+        _ = framework.RunOnFrameworkThread(() =>
+        {
+            if (coordinateApplier.ReadCurrent())
+                SetOtherPluginTestCoordinates(coordinateApplier.X, coordinateApplier.Y, coordinateApplier.Z);
+
+            OtherPluginTestStatus = coordinateApplier.Status;
+        });
+    }
+
+    public void TestOtherPluginApplyCoordinate(float x, float y, float z)
+    {
+        SetOtherPluginTestCoordinates(x, y, z);
+        _ = framework.RunOnFrameworkThread(() => ApplyOtherPluginCoordinateOnFrameworkThread(x, y, z));
+    }
+
+    public void TestOtherPluginOpenMarket()
+    {
+        _ = framework.RunOnFrameworkThread(() =>
+        {
+            RetireOtherPluginMarketSession("new-session");
+            otherPluginMarketTestActive = true;
+            otherPluginMarketPurchaseRequestObserved = false;
+            otherPluginMarketSessionOpenedAt = DateTime.UtcNow;
+            otherPluginMarketRefreshItemId = 0;
+            otherPluginMarketRefreshAttempts = 0;
+            openMarketAnywhere.OpenSearchShell();
+            otherPluginMarketStatus = "已打开原生市场搜索界面；购买、回包、结果刷新和关闭均由游戏原生链路处理。";
+            OtherPluginTestStatus = openMarketAnywhere.Status;
+            log.Information("Opened standalone ItemSearch through native-only market chain.");
+        });
+    }
 
     private bool CanRunAutomationOrTest => IsAutoTreasureHuntEnabled || manualTestModeActive;
 
@@ -488,6 +813,10 @@ public sealed class Plugin : IDalamudPlugin
         clientState.ZoneInit -= OnZoneInit;
         gameInventory.InventoryChanged -= OnInventoryChanged;
         chatGui.ChatMessage -= OnChatMessage;
+        marketBoard.PurchaseRequested -= OnOtherPluginMarketPurchaseRequested;
+        marketBoard.ItemPurchased -= OnOtherPluginMarketItemPurchased;
+        commandManager.RemoveHandler("/lltp");
+        commandManager.RemoveHandler("/llmarket");
     }
 
     public void SetAutoTreasureHuntEnabled(bool enabled)
@@ -646,6 +975,7 @@ public sealed class Plugin : IDalamudPlugin
         {
             UserCredentialHash => CredentialRole.User,
             DeveloperCredentialHash => CredentialRole.Developer,
+            AdvancedCredentialHash => CredentialRole.Advanced,
             _ => CredentialRole.None,
         };
     }
@@ -2881,8 +3211,24 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    private void OnFrameworkUpdate(IFramework framework)
+    private unsafe void OnFrameworkUpdate(IFramework framework)
     {
+        TryRefreshOtherPluginMarketResult();
+
+        if (otherPluginMarketTestActive &&
+            DateTime.UtcNow - otherPluginMarketSessionOpenedAt > TimeSpan.FromSeconds(1) &&
+            !IsOtherPluginMarketSessionOpen())
+        {
+            RetireOtherPluginMarketSession("search-closed");
+        }
+
+        if (otherPluginMarketPurchaseRequestObserved &&
+            DateTime.UtcNow - otherPluginMarketPurchaseSentAt > TimeSpan.FromSeconds(15))
+        {
+            otherPluginMarketPurchaseRequestObserved = false;
+            otherPluginMarketStatus = "购买请求发出超过 15 秒仍未收到服务器结果；报价可能已过期或市场会话无效。";
+        }
+
         if (!IsCredentialValidated || !CanRunAutomationOrTest)
         {
             return;

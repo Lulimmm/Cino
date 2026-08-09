@@ -14,6 +14,12 @@ public sealed class PluginConfiguration : IPluginConfiguration
 
     public TreasureHuntLogicMode LogicMode { get; set; } = TreasureHuntLogicMode.Head;
 
+    public float OtherPluginTestX { get; set; }
+
+    public float OtherPluginTestY { get; set; }
+
+    public float OtherPluginTestZ { get; set; }
+
 }
 
 public enum CredentialRole
@@ -21,6 +27,7 @@ public enum CredentialRole
     None,
     User,
     Developer,
+    Advanced,
 }
 
 public enum TreasureHuntLogicMode
