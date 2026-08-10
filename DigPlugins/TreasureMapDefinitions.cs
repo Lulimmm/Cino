@@ -48,6 +48,7 @@ internal static class TreasureMapDefinitions
     internal static readonly List<uint> RouletteDreamBaseIds =
     [
         2014790,
+        2009598,
     ];
 
     // 【选门副本地图 ID】进入这些地图后启用选门独占逻辑；后续适配新副本时追加地图 ID。

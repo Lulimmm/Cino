@@ -169,6 +169,14 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime treasurePortalSearchDeadline;
     private bool confirmTreasurePortalPending;
     private DateTime treasurePortalConfirmDeadline;
+    // 第二次开箱后，任务事件和任务道具库存可能不会在同一帧完成结算。
+    // 在确认任务结算稳定前禁止进入下一张地图的解读流程。
+    private bool treasureQuestSettlementPending;
+    private DateTime treasureQuestSettlementGuardUntil;
+    private DateTime treasureQuestSettlementLastSampleAt;
+    private int treasureQuestSettlementStableSamples;
+    private int treasureQuestSettlementLastTaskCount;
+    private int treasureQuestSettlementLastTreasureCount;
     private bool autoWaitingForTaskTreasureMap;
     private bool autoMapCommandSent;
     private bool autoMapFlagRetryQueued;
@@ -681,6 +689,7 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             autoWaitingForTaskTreasureMap = false;
+            ResetTreasureQuestSettlementGuard();
             waitingForAutomaticMapFlag = false;
             headFlagTeleportPending = false;
             headFlagTeleportReady = false;
@@ -829,6 +838,13 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        if (treasureQuestSettlementPending && !IsTreasureQuestSettlementReady())
+        {
+            AutoTreasureHuntStatus = "第二次开箱后的藏宝图任务仍在结算，暂不解读下一张地图。";
+            TeleportTestStatus = AutoTreasureHuntStatus;
+            return;
+        }
+
         if (TreasureMapDefinitions.DoorSelectionInstanceMapIds.Contains(clientState.MapId))
         {
             EnterDoorSelectionMode();
@@ -842,7 +858,15 @@ public sealed class Plugin : IDalamudPlugin
 
         if (condition[ConditionFlag.OccupiedInQuestEvent])
         {
+            if (!treasureQuestSettlementPending)
+            {
+                BeginTreasureQuestSettlementGuard();
+            }
+
             AutoTreasureHuntStatus = "当前仍处于藏宝图任务事件中，等待任务结算后再解读下一张地图或进入补图。";
+            _ = framework.RunOnTick(
+                StartAutoTreasureHuntOnFrameworkThread,
+                delay: TimeSpan.FromSeconds(1));
             return;
         }
 
@@ -1223,6 +1247,7 @@ public sealed class Plugin : IDalamudPlugin
     public void TestFindAndOpenTreasureChest()
     {
         ResumeAfterEmergencyStop();
+        ResetTreasureQuestSettlementGuard();
         treasureChestPending = true;
         treasureChestEntityId = 0;
         chestPositionSampleValid = false;
@@ -1243,6 +1268,7 @@ public sealed class Plugin : IDalamudPlugin
     public void TestFindAndEnterTreasurePortal()
     {
         ResumeAfterEmergencyStop();
+        ResetTreasureQuestSettlementGuard();
         treasurePortalPending = true;
         treasurePortalEntityId = 0;
         treasurePortalCloseDelayStarted = false;
@@ -1475,6 +1501,7 @@ public sealed class Plugin : IDalamudPlugin
         treasurePortalEntityId = 0;
         treasurePortalCloseDelayStarted = false;
         confirmTreasurePortalPending = false;
+        ResetTreasureQuestSettlementGuard();
 
         rouletteModeActive = false;
         rouletteWasInCombat = false;
@@ -2925,6 +2952,7 @@ public sealed class Plugin : IDalamudPlugin
         treasureChestPending = false;
         confirmTreasurePortalPending = false;
         treasurePortalPending = false;
+        ResetTreasureQuestSettlementGuard();
         AutoTreasureHuntStatus = $"野外流程防卡：已清理卡住状态并重新检查地图（第 {workflowWatchdogRecoveryCount} 次）。";
         TeleportTestStatus = AutoTreasureHuntStatus;
         if (IsAutoTreasureHuntEnabled)
@@ -5827,6 +5855,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private string StartTreasureChestSearch()
     {
+        ResetTreasureQuestSettlementGuard();
         treasureChestPending = true;
         treasureChestEntityId = 0;
         chestPositionSampleValid = false;
@@ -5841,6 +5870,87 @@ public sealed class Plugin : IDalamudPlugin
         treasurePortalSearchDeadline = default;
         confirmTreasurePortalPending = false;
         return "已使用挖掘，等待宝箱出现。";
+    }
+
+    private void BeginTreasureQuestSettlementGuard()
+    {
+        RefreshTreasureMapCounts();
+        treasureQuestSettlementPending = true;
+        treasureQuestSettlementGuardUntil = DateTime.UtcNow.AddSeconds(5);
+        treasureQuestSettlementLastSampleAt = DateTime.UtcNow;
+        treasureQuestSettlementStableSamples = 0;
+        treasureQuestSettlementLastTaskCount = TaskTreasureMapCount;
+        treasureQuestSettlementLastTreasureCount = TreasureMapCount;
+    }
+
+    private void ResetTreasureQuestSettlementGuard()
+    {
+        treasureQuestSettlementPending = false;
+        treasureQuestSettlementGuardUntil = default;
+        treasureQuestSettlementLastSampleAt = default;
+        treasureQuestSettlementStableSamples = 0;
+        treasureQuestSettlementLastTaskCount = 0;
+        treasureQuestSettlementLastTreasureCount = 0;
+    }
+
+    private bool IsTreasureQuestSettlementReady()
+    {
+        if (!treasureQuestSettlementPending)
+        {
+            return true;
+        }
+
+        RefreshTreasureMapCounts();
+        var now = DateTime.UtcNow;
+        if (HasTaskTreasureMap)
+        {
+            // 任务道具已经出现时，后续只能进入当前地图传送流程，
+            // 不能把普通背包地图当成下一轮解读目标。
+            ResetTreasureQuestSettlementGuard();
+            return true;
+        }
+
+        if (condition[ConditionFlag.OccupiedInQuestEvent])
+        {
+            // 只要卫月任务事件仍为真，就把稳定窗口重新向后推迟。
+            treasureQuestSettlementGuardUntil = now.AddSeconds(3);
+            treasureQuestSettlementLastSampleAt = now;
+            treasureQuestSettlementStableSamples = 0;
+            treasureQuestSettlementLastTaskCount = TaskTreasureMapCount;
+            treasureQuestSettlementLastTreasureCount = TreasureMapCount;
+            return false;
+        }
+
+        if (now < treasureQuestSettlementGuardUntil)
+        {
+            return false;
+        }
+
+        if (TaskTreasureMapCount != treasureQuestSettlementLastTaskCount ||
+            TreasureMapCount != treasureQuestSettlementLastTreasureCount)
+        {
+            // 库存事件可能晚于任务事件一到数帧到达；库存变化后重新开始稳定采样。
+            treasureQuestSettlementLastTaskCount = TaskTreasureMapCount;
+            treasureQuestSettlementLastTreasureCount = TreasureMapCount;
+            treasureQuestSettlementLastSampleAt = now;
+            treasureQuestSettlementStableSamples = 0;
+            return false;
+        }
+
+        if (now - treasureQuestSettlementLastSampleAt < TimeSpan.FromSeconds(1))
+        {
+            return false;
+        }
+
+        treasureQuestSettlementLastSampleAt = now;
+        treasureQuestSettlementStableSamples++;
+        if (treasureQuestSettlementStableSamples < 2)
+        {
+            return false;
+        }
+
+        ResetTreasureQuestSettlementGuard();
+        return true;
     }
 
     private void TryHandleTreasureCombat()
@@ -6069,6 +6179,7 @@ public sealed class Plugin : IDalamudPlugin
         else
         {
             confirmTreasureChestPending = false;
+            BeginTreasureQuestSettlementGuard();
             treasurePortalPending = true;
             treasurePortalEntityId = 0;
             treasurePortalCloseDelayStarted = false;
@@ -6098,34 +6209,34 @@ public sealed class Plugin : IDalamudPlugin
                 DateTime.UtcNow >= treasurePortalSearchDeadline)
             {
                 RefreshTreasureMapCounts();
-                if (condition[ConditionFlag.OccupiedInQuestEvent] && HasTreasureMap)
+                if (!IsTreasureQuestSettlementReady())
                 {
                     treasurePortalSearchDeadline = DateTime.UtcNow.AddSeconds(1);
-                    AutoTreasureHuntStatus = "第二次开箱后未出现传送魔纹，仍处于藏宝图任务事件且还有备用地图；等待任务结算后再解读下一张地图。";
+                    AutoTreasureHuntStatus = "第二次开箱后未出现传送魔纹，正在等待任务事件和库存状态稳定，暂不解读下一张地图。";
                     TeleportTestStatus = AutoTreasureHuntStatus;
                     return;
                 }
 
-                if (!HasTaskTreasureMap)
+                if (condition[ConditionFlag.OccupiedInQuestEvent])
                 {
-                    // 没有传送魔纹不等于藏宝图任务已结算。狞豹革等选门地图在
-                    // 第二次开箱后可能直接结束本轮；必须等待卫月任务事件状态解除，
-                    // 避免仍在任务内就开始解读下一张地图。
-                    if (condition[ConditionFlag.OccupiedInQuestEvent])
+                    if (!treasureQuestSettlementPending)
                     {
-                        treasurePortalSearchDeadline = DateTime.UtcNow.AddSeconds(1);
-                        AutoTreasureHuntStatus = "本次挖宝未出现传送魔纹，仍在藏宝图任务事件中，等待任务结算后再继续。";
-                        TeleportTestStatus = AutoTreasureHuntStatus;
-                        return;
+                        BeginTreasureQuestSettlementGuard();
                     }
 
+                    treasurePortalSearchDeadline = DateTime.UtcNow.AddSeconds(1);
+                    AutoTreasureHuntStatus = "第二次开箱后未出现传送魔纹，仍处于藏宝图任务事件，等待任务结算。";
+                    TeleportTestStatus = AutoTreasureHuntStatus;
+                    return;
+                }
+
+                if (HasTaskTreasureMap)
+                {
                     treasurePortalPending = false;
                     treasurePortalEntityId = 0;
                     treasurePortalCloseDelayStarted = false;
                     treasurePortalSearchDeadline = default;
-                    AutoTreasureHuntStatus = HasTreasureMap
-                        ? $"本次挖宝已结束且未发现传送魔纹，检测到背包和鞍囊中还有 {TreasureMapCount} 张地图，准备继续解读。"
-                        : "本次挖宝已结束且未发现传送魔纹，正在重新检查地图库存。";
+                    AutoTreasureHuntStatus = "未发现传送魔纹，但已检测到任务道具地图，准备恢复当前地图传送流程。";
                     TeleportTestStatus = AutoTreasureHuntStatus;
                     _ = framework.RunOnTick(
                         () =>
@@ -6139,14 +6250,31 @@ public sealed class Plugin : IDalamudPlugin
                     return;
                 }
 
-                // 库存事件可能比任务道具刷新更早，继续给游戏几秒钟同步状态。
-                treasurePortalSearchDeadline = DateTime.UtcNow.AddSeconds(5);
+                treasurePortalPending = false;
+                treasurePortalEntityId = 0;
+                treasurePortalCloseDelayStarted = false;
+                treasurePortalSearchDeadline = default;
+                AutoTreasureHuntStatus = HasTreasureMap
+                    ? $"本次挖宝已结束且未发现传送魔纹，检测到背包和鞍囊中还有 {TreasureMapCount} 张地图，准备继续解读。"
+                    : "本次挖宝已结束且未发现传送魔纹，正在重新检查地图库存。";
+                TeleportTestStatus = AutoTreasureHuntStatus;
+                _ = framework.RunOnTick(
+                    () =>
+                    {
+                        if (IsAutoTreasureHuntEnabled && !IsRouletteMode && !emergencyStopActive)
+                        {
+                            StartAutoTreasureHuntOnFrameworkThread();
+                        }
+                    },
+                    delay: TimeSpan.FromSeconds(1));
+                return;
             }
 
             TeleportTestStatus = "第二次宝箱已开启，等待传送魔纹出现。";
             return;
         }
 
+        ResetTreasureQuestSettlementGuard();
         if (treasurePortalEntityId == 0)
         {
             treasurePortalEntityId = portal.EntityId;
