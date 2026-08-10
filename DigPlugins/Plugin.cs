@@ -75,6 +75,7 @@ public sealed class Plugin : IDalamudPlugin
     private const uint LimsaLowerDecksTerritoryId = 129;
     private const uint MarketBoardBaseId = 2000402;
     private static readonly TimeSpan MarketPurchaseActionDelay = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan MarketBoardOpenStabilizationDelay = TimeSpan.FromSeconds(2);
     private const string UserCredentialHash = "58bc0f328fbfb79b6ebfec309e20974128f9c8e965f9b553cbaf8c28a1f72c61";
     private const string DeveloperCredentialHash = "6b7e18dffccc763c26914ff41a8782c1d60ec9155d86bcefeaef65c75b88b5ec";
     private const string AdvancedCredentialHash = "b517162f99cbf9966d8e5e412e44f52dbe0f59683c820d8748f544f3c8391818";
@@ -1683,7 +1684,12 @@ public sealed class Plugin : IDalamudPlugin
             unsafe
             {
                 var searchAddon = gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
-                if (searchAddon != null && searchAddon->IsReady)
+                var searchAgent = AgentItemSearch.Instance();
+                if (searchAddon != null &&
+                    searchAddon->IsReady &&
+                    searchAddon->ResultsList != null &&
+                    searchAddon->SearchTextInput != null &&
+                    searchAgent != null)
                 {
                     marketBoardInteractionPending = false;
                     marketBoardInteractionAttempted = false;
@@ -1693,8 +1699,8 @@ public sealed class Plugin : IDalamudPlugin
                     marketPurchaseInitialMainCount = CountTreasureMaps(MainInventoryTypes, marketPurchaseItemId);
                     marketPurchaseAutomatic = automaticMapSupplementRunning;
                     marketPurchaseStage = MarketPurchaseStage.WaitingForSearchAddon;
-                    marketSearchRunAt = DateTime.UtcNow + MarketPurchaseActionDelay;
-                    marketPurchaseDeadline = DateTime.UtcNow.AddSeconds(15);
+                    marketSearchRunAt = DateTime.UtcNow + MarketBoardOpenStabilizationDelay;
+                    marketPurchaseDeadline = DateTime.UtcNow.AddSeconds(25);
                     TeleportTestStatus = $"已确认市场布告板窗口打开，等待搜索{marketPurchaseItemName}。";
                     return;
                 }
@@ -1760,6 +1766,15 @@ public sealed class Plugin : IDalamudPlugin
 
         targetManager.Target = marketBoard;
         var interactionResult = InteractWithGameObject(marketBoard);
+        if (interactionResult == 0)
+        {
+            marketBoardInteractionAttempted = false;
+            marketBoardInteractionRetryAt = DateTime.UtcNow.AddMilliseconds(250);
+            marketBoardPositionStableSince = DateTime.UtcNow;
+            TeleportTestStatus = "市场布告板交互调用未成功，站稳后重试。";
+            return;
+        }
+
         marketBoardInteractionAttempted = true;
         marketBoardInteractionRetryAt = DateTime.UtcNow.AddSeconds(2);
         TeleportTestStatus = $"卫月已调用市场布告板交互（返回值：{interactionResult}），等待确认市场窗口打开。";
@@ -2050,6 +2065,11 @@ public sealed class Plugin : IDalamudPlugin
         if (!infoProxy->SetLastPurchasedItem(&purchaseRequest))
         {
             marketPricePageReadySince = default;
+            if (TryRetryMarketPricePage("卫月报价尚未被市场代理接受，正在重建市场会话后重试。"))
+            {
+                return;
+            }
+
             TeleportTestStatus = "卫月接口尚未接受最低价报价，等待价格页稳定后重试。";
             return;
         }
@@ -2057,6 +2077,11 @@ public sealed class Plugin : IDalamudPlugin
         if (!infoProxy->SendPurchaseRequestPacket())
         {
             marketPricePageReadySince = default;
+            if (TryRetryMarketPricePage("卫月提交购买请求失败，正在重建市场会话后重试。"))
+            {
+                return;
+            }
+
             TeleportTestStatus = "卫月接口暂未提交购买请求，等待一秒后在当前价格页重试。";
             return;
         }
