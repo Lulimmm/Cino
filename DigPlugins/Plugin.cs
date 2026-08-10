@@ -180,6 +180,7 @@ public sealed class Plugin : IDalamudPlugin
     private int treasureQuestSettlementLastTreasureCount;
     private bool autoWaitingForTaskTreasureMap;
     private bool autoMapCommandSent;
+    private DateTime automaticMapFlagRequestedAt;
     private bool autoMapFlagRetryQueued;
     private bool waitingForAutomaticMapFlag;
     private bool headFlagTeleportPending;
@@ -252,6 +253,7 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime wheelFlagReadyAt;
     private bool wheelNewFlagPending;
     private bool wheelFlagSnapshotValid;
+    private DateTime wheelFlagRefreshRequestedAt;
     private uint wheelFlagSnapshotTerritoryId;
     private uint wheelFlagSnapshotMapId;
     private float wheelFlagSnapshotX;
@@ -3321,6 +3323,8 @@ public sealed class Plugin : IDalamudPlugin
             wheelNewFlagPending = true;
             wheelTeleportSourceMapId = clientState.MapId;
             wheelFlagReadyAt = DateTime.UtcNow.AddSeconds(1);
+            wheelFlagRefreshRequestedAt = DateTime.UtcNow;
+            wheelFlagRefreshRequestedAt = DateTime.UtcNow;
             WheelMapLinkStatus = $"已打开 {mapLink.PlaceName} {mapLink.CoordinateString}，等待游戏设置红旗。";
             AutoTreasureHuntStatus = "车轮：已根据聊天地图链接设置红旗。";
         }
@@ -3366,6 +3370,11 @@ public sealed class Plugin : IDalamudPlugin
         var addon = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
         if (addon == null || !addon->IsReady || !addon->IsVisible || addon->PromptText == null)
         {
+            if (wheelTeleportAcceptSubmitted && wheelAwaitingMapChangeAndFlag)
+            {
+                return;
+            }
+
             ResetWheelTeleportAcceptance();
             return;
         }
@@ -3379,8 +3388,20 @@ public sealed class Plugin : IDalamudPlugin
             !prompt.Contains("接受传送", StringComparison.Ordinal) &&
             !prompt.Contains("传送邀请", StringComparison.Ordinal))
         {
+            if (wheelTeleportAcceptSubmitted && wheelAwaitingMapChangeAndFlag)
+            {
+                return;
+            }
+
             ResetWheelTeleportAcceptance();
             return;
+        }
+
+        // 接受状态只在当前传送流程等待地图切换时有效；地图 12 的特殊流程
+        // 结束后可能仍残留旧标志，不能让它阻塞新的传送邀请。
+        if (wheelTeleportAcceptSubmitted && !wheelAwaitingMapChangeAndFlag)
+        {
+            ResetWheelTeleportAcceptance();
         }
 
         if (wheelTeleportAcceptSubmitted)
@@ -3426,6 +3447,7 @@ public sealed class Plugin : IDalamudPlugin
         wheelPendingMapLink = null;
         wheelNewFlagPending = false;
         wheelFlagSnapshotValid = false;
+        wheelFlagRefreshRequestedAt = default;
         wheelAwaitingMapChangeAndFlag = false;
         wheelTeleportSourceMapId = 0;
         wheelFlagReadyAt = default;
@@ -3491,6 +3513,17 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         if (wheelFlagSnapshotValid &&
+            wheelFlagRefreshRequestedAt != default &&
+            DateTime.UtcNow - wheelFlagRefreshRequestedAt >= TimeSpan.FromSeconds(5) &&
+            wheelFlagSnapshotTerritoryId == flagMarker.TerritoryId &&
+            wheelFlagSnapshotMapId == flagMarker.MapId &&
+            MathF.Abs(wheelFlagSnapshotX - flagMarker.XFloat) <= 0.01f &&
+            MathF.Abs(wheelFlagSnapshotY - flagMarker.YFloat) <= 0.01f)
+        {
+            wheelFlagSnapshotValid = false;
+        }
+
+        if (wheelFlagSnapshotValid &&
             wheelFlagSnapshotTerritoryId == flagMarker.TerritoryId &&
             wheelFlagSnapshotMapId == flagMarker.MapId &&
             MathF.Abs(wheelFlagSnapshotX - flagMarker.XFloat) <= 0.01f &&
@@ -3503,6 +3536,7 @@ public sealed class Plugin : IDalamudPlugin
         if (currentMapId == OptimizedInteractionMapId || currentMapId == RouletteMapId)
         {
             wheelAwaitingMapChangeAndFlag = false;
+            wheelTeleportAcceptSubmitted = false;
             wheelTeleportSourceMapId = 0;
             mountAfterTeleportPending = false;
             mountRetryQueued = false;
@@ -3514,6 +3548,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         wheelAwaitingMapChangeAndFlag = false;
+        wheelTeleportAcceptSubmitted = false;
         wheelTeleportSourceMapId = 0;
         mountAfterTeleportPending = true;
         mountRetryQueued = false;
@@ -5005,6 +5040,12 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        if (waitingForAutomaticMapFlag && !HasTaskTreasureMap)
+        {
+            TeleportTestStatus = "任务道具中暂时没有藏宝图，不能通过 /tmap 获取当前地图红旗，继续等待任务道具刷新。";
+            return;
+        }
+
         if (waitingForAutomaticMapFlag && !autoMapCommandSent)
         {
             if (TryRequestAutomaticTreasureMap())
@@ -5063,6 +5104,20 @@ public sealed class Plugin : IDalamudPlugin
             MathF.Abs(lastAnnouncedFlagX - flagX) <= 0.01f &&
             MathF.Abs(lastAnnouncedFlagY - flagY) <= 0.01f)
         {
+            if (automaticMapFlagRequestedAt != default &&
+                DateTime.UtcNow - automaticMapFlagRequestedAt >= TimeSpan.FromSeconds(5))
+            {
+                waitingForAutomaticMapFlag = false;
+                autoMapCommandSent = true;
+                autoMapFlagRetryQueued = false;
+                hasAnnouncedFlag = false;
+            }
+            else
+            {
+                TryRequestAutomaticTreasureMap();
+                return;
+            }
+
             TeleportTestStatus = "已请求新的任务地图，但红旗仍是上一轮坐标，等待游戏刷新。";
             TryRequestAutomaticTreasureMap();
             return;
@@ -5416,6 +5471,7 @@ public sealed class Plugin : IDalamudPlugin
         if (!autoMapCommandSent)
         {
             autoMapCommandSent = true;
+            automaticMapFlagRequestedAt = DateTime.UtcNow;
             var commandAccepted = commandManager.ProcessCommand("/tmap");
             AutoTreasureHuntStatus = commandAccepted
                 ? "任务道具中有地图但没有标点信息，已执行 /tmap，等待地图标点。"
