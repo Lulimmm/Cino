@@ -10,6 +10,7 @@ using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.Text;
 using Dalamud.Plugin.Services;
+using Dalamud.Interface.Textures;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
@@ -345,7 +346,8 @@ public sealed class Plugin : IDalamudPlugin
         ITargetManager targetManager,
         IMarketBoard marketBoard,
         IPluginLog log,
-        IGameInteropProvider interop)
+        IGameInteropProvider interop,
+        ITextureProvider textureProvider)
     {
         this.pluginInterface = pluginInterface;
         this.gameInventory = gameInventory;
@@ -370,7 +372,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         coordinateApplier = new CoordinateApplier(objectTable, SaveConfiguration);
-        openMarketAnywhere = new OpenMarketAnywhere(framework, gameGui, log, interop, marketBoard);
+        openMarketAnywhere = new OpenMarketAnywhere(framework, gameGui, log, interop, marketBoard, dataManager, textureProvider);
 
         ValidateSavedCredential();
         mainWindow = new MainWindow(this, this.pluginInterface);
@@ -563,11 +565,13 @@ public sealed class Plugin : IDalamudPlugin
     {
         _ = framework.RunOnFrameworkThread(() =>
         {
-            openMarketAnywhere.OpenSearchShell();
+            openMarketAnywhere.OpenCustomMarketUi();
             OtherPluginTestStatus = openMarketAnywhere.Status;
-            log.Information("Opened standalone ItemSearch through native-only market chain.");
+            log.Information("Opened custom market UI without native market board addons.");
         });
     }
+
+    public void DrawCustomMarketUi() => openMarketAnywhere.DrawCustomMarketUi();
 
     private bool CanRunAutomationOrTest => IsAutoTreasureHuntEnabled || manualTestModeActive;
 

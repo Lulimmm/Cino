@@ -30,6 +30,7 @@ public sealed class MainWindow
 
     public void Draw()
     {
+        plugin.DrawCustomMarketUi();
         if (!isOpen)
         {
             return;
