@@ -15,6 +15,7 @@ public sealed class MainWindow
     private bool isOpen = true;
     private string credentialInput = string.Empty;
     private string credentialStatus = string.Empty;
+    private bool credentialValidationInProgress;
     private string navigationBaseIdInput = "2013860";
 
     public MainWindow(Plugin plugin, IDalamudPluginInterface pluginInterface)
@@ -85,12 +86,20 @@ public sealed class MainWindow
 
     private void DrawCredentialPage()
     {
+        plugin.EnsureValidationServerHealthCheck();
+
         if (string.IsNullOrEmpty(credentialInput) && plugin.HasSavedCredential)
         {
             credentialInput = RememberedCredentialMask;
         }
 
         ImGui.Text("凭证验证");
+        var serverStatusColor = plugin.ValidationServerConnected == true
+            ? RunningColor
+            : plugin.ValidationServerConnected == false
+                ? StoppedColor
+                : new Vector4(0.95f, 0.75f, 0.25f, 1.00f);
+        ImGui.TextColored(serverStatusColor, plugin.ValidationServerStatusText);
         ImGui.SetNextItemWidth(-1);
         if (ImGui.InputText("###Credential", ref credentialInput, 128, ImGuiInputTextFlags.Password | ImGuiInputTextFlags.EnterReturnsTrue))
         {
@@ -109,11 +118,17 @@ public sealed class MainWindow
         }
     }
 
-    private void ValidateCredentialInput()
+    private async void ValidateCredentialInput()
     {
+        if (credentialValidationInProgress)
+            return;
+
+        credentialValidationInProgress = true;
+        credentialStatus = "验证中…";
         var validated = credentialInput == RememberedCredentialMask
             ? plugin.ValidateRememberedCredential()
-            : plugin.ValidateCredential(credentialInput);
+            : await plugin.ValidateCredentialAsync(credentialInput);
+        credentialValidationInProgress = false;
 
         if (validated)
         {
@@ -124,6 +139,8 @@ public sealed class MainWindow
         {
             credentialStatus = "凭证无效";
         }
+        if (!validated && !string.IsNullOrEmpty(plugin.CredentialValidationError))
+            credentialStatus = plugin.CredentialValidationError;
     }
 
     private void DrawAutoTreasureHuntPage()

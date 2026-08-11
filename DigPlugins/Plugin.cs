@@ -12,6 +12,7 @@ using Dalamud.Game.Text;
 using Dalamud.Plugin.Services;
 using Dalamud.Interface.Textures;
 using FFXIVClientStructs.FFXIV.Client.Game;
+using FFXIVClientStructs.FFXIV.Client.Game.Character;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
@@ -22,6 +23,8 @@ using FFXIVClientStructs.FFXIV.Component.GUI;
 using Dalamud.Game.Text.SeStringHandling.Payloads;
 using System.Security.Cryptography;
 using System.Text;
+using System.Net.Http.Json;
+using System.Text.Json;
 using GameUtf8String = FFXIVClientStructs.FFXIV.Client.System.String.Utf8String;
 using LuminaAetheryte = Lumina.Excel.Sheets.Aetheryte;
 using LuminaMap = Lumina.Excel.Sheets.Map;
@@ -76,9 +79,10 @@ public sealed class Plugin : IDalamudPlugin
     private const uint MarketBoardBaseId = 2000402;
     private static readonly TimeSpan MarketPurchaseActionDelay = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan MarketBoardOpenStabilizationDelay = TimeSpan.FromSeconds(2);
-    private const string UserCredentialHash = "58bc0f328fbfb79b6ebfec309e20974128f9c8e965f9b553cbaf8c28a1f72c61";
     private const string DeveloperCredentialHash = "6b7e18dffccc763c26914ff41a8782c1d60ec9155d86bcefeaef65c75b88b5ec";
     private const string AdvancedCredentialHash = "b517162f99cbf9966d8e5e412e44f52dbe0f59683c820d8748f544f3c8391818";
+    private const string LicenseValidationEndpoint = "https://cino-license.3118311515.workers.dev/v1/validate";
+    private static readonly HttpClient LicenseHttpClient = new() { Timeout = TimeSpan.FromSeconds(10) };
     private static readonly GameInventoryType[] MainInventoryTypes =
     [
         GameInventoryType.Inventory1,
@@ -132,6 +136,10 @@ public sealed class Plugin : IDalamudPlugin
     private readonly CoordinateApplier coordinateApplier;
     private readonly OpenMarketAnywhere openMarketAnywhere;
     private CredentialRole sessionCredentialRole;
+    private bool validationServerCheckInProgress;
+    private DateTime validationServerLastCheckedAt;
+    private bool? validationServerConnected;
+    private string credentialValidationError = string.Empty;
     private readonly MainWindow mainWindow;
     private bool selectMapPending;
     private bool confirmMapPending;
@@ -496,6 +504,47 @@ public sealed class Plugin : IDalamudPlugin
         _ => "未验证",
     };
 
+    public bool? ValidationServerConnected => validationServerConnected;
+
+    public string CredentialValidationError => credentialValidationError;
+
+    public string ValidationServerStatusText => validationServerConnected switch
+    {
+        true => "成功连接至验证服务器",
+        false => "未连接至验证服务器",
+        _ => "正在连接验证服务器…",
+    };
+
+    public void EnsureValidationServerHealthCheck()
+    {
+        if (validationServerCheckInProgress ||
+            DateTime.UtcNow - validationServerLastCheckedAt < TimeSpan.FromSeconds(30))
+            return;
+
+        validationServerCheckInProgress = true;
+        _ = CheckValidationServerHealthAsync();
+    }
+
+    private async Task CheckValidationServerHealthAsync()
+    {
+        try
+        {
+            using var response = await LicenseHttpClient.GetAsync(
+                "https://cino-license.3118311515.workers.dev/health");
+            validationServerConnected = response.IsSuccessStatusCode;
+        }
+        catch (Exception ex)
+        {
+            validationServerConnected = false;
+            log.Warning(ex, "Validation server health check failed.");
+        }
+        finally
+        {
+            validationServerLastCheckedAt = DateTime.UtcNow;
+            validationServerCheckInProgress = false;
+        }
+    }
+
     public int MainInventoryTreasureMapCount { get; private set; }
 
     public int SaddlebagTreasureMapCount { get; private set; }
@@ -760,21 +809,91 @@ public sealed class Plugin : IDalamudPlugin
         pluginInterface.SavePluginConfig(configuration);
     }
 
-    public bool ValidateCredential(string credential)
+    public async Task<bool> ValidateCredentialAsync(string credential)
     {
+        credentialValidationError = string.Empty;
         var hash = ComputeCredentialHash(credential.Trim());
         var role = GetCredentialRole(hash);
 
-        if (role == CredentialRole.None)
+        // Developer and advanced credentials remain permanent local credentials.
+        if (role is CredentialRole.Developer or CredentialRole.Advanced)
         {
+            SetValidatedCredential(hash, role);
+            return true;
+        }
+
+        // Character.ContentId is game memory, so read it on the framework
+        // thread before sending the value to the remote validator.
+        var accountId = await framework.RunOnFrameworkThread(GetLocalAccountId);
+        if (accountId == 0)
+        {
+            credentialValidationError = "无法读取当前账号信息";
             return false;
         }
 
+        try
+        {
+            using var response = await LicenseHttpClient.PostAsJsonAsync(
+                LicenseValidationEndpoint,
+                new { credential = credential.Trim(), accountId = accountId.ToString() });
+            await using var stream = await response.Content.ReadAsStreamAsync();
+            using var document = await JsonDocument.ParseAsync(stream);
+            var root = document.RootElement;
+            if (!response.IsSuccessStatusCode)
+            {
+                credentialValidationError = root.TryGetProperty("error", out var error)
+                    && error.ValueKind == JsonValueKind.String
+                    && error.GetString() == "credential_bound_to_another_account"
+                    ? "凭证绑定的不是此账号"
+                    : "凭证无效";
+                return false;
+            }
+
+            if (!root.TryGetProperty("ok", out var ok) || !ok.GetBoolean() ||
+                !root.TryGetProperty("role", out var roleElement))
+            {
+                credentialValidationError = "凭证无效";
+                return false;
+            }
+
+            var serverRole = roleElement.GetString() switch
+            {
+                "user" => CredentialRole.User,
+                "advanced" => CredentialRole.Advanced,
+                "developer" => CredentialRole.Developer,
+                _ => CredentialRole.None,
+            };
+            if (serverRole == CredentialRole.None)
+            {
+                credentialValidationError = "凭证无效";
+                return false;
+            }
+
+            SetValidatedCredential(hash, serverRole);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            log.Warning(ex, "Cloudflare credential validation request failed.");
+            credentialValidationError = "未连接至验证服务器";
+            return false;
+        }
+    }
+
+    private void SetValidatedCredential(string hash, CredentialRole role)
+    {
         sessionCredentialRole = role;
         configuration.CredentialHash = hash;
         configuration.CredentialRole = role;
         pluginInterface.SavePluginConfig(configuration);
-        return true;
+    }
+
+    private unsafe ulong GetLocalAccountId()
+    {
+        var localPlayer = objectTable.LocalPlayer;
+        return localPlayer != null && localPlayer.Address != nint.Zero
+            ? ((Character*)localPlayer.Address)->ContentId
+            : 0;
     }
 
     public bool ValidateRememberedCredential()
@@ -793,7 +912,12 @@ public sealed class Plugin : IDalamudPlugin
 
     private void ValidateSavedCredential()
     {
-        sessionCredentialRole = GetCredentialRole(configuration.CredentialHash);
+        var savedRole = GetCredentialRole(configuration.CredentialHash);
+        // User credentials are server-bound and must be entered again on each
+        // plugin start. Only permanent local credentials are restored.
+        sessionCredentialRole = savedRole is CredentialRole.Advanced or CredentialRole.Developer
+            ? savedRole
+            : CredentialRole.None;
         configuration.CredentialRole = sessionCredentialRole;
     }
 
@@ -801,7 +925,6 @@ public sealed class Plugin : IDalamudPlugin
     {
         return credentialHash switch
         {
-            UserCredentialHash => CredentialRole.User,
             DeveloperCredentialHash => CredentialRole.Developer,
             AdvancedCredentialHash => CredentialRole.Advanced,
             _ => CredentialRole.None,
