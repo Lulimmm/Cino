@@ -51,6 +51,13 @@ internal static class TreasureMapDefinitions
         2009598,
     ];
 
+    // 【转盘副本地图 ID】进入这些地图后启用转盘逻辑。
+    internal static readonly List<uint> RouletteInstanceMapIds =
+    [
+        1059,
+        818,
+    ];
+
     // 【选门副本地图 ID】进入这些地图后启用选门独占逻辑；后续适配新副本时追加地图 ID。
     internal static readonly List<uint> DoorSelectionInstanceMapIds =
     [

@@ -65,7 +65,6 @@ public sealed class Plugin : IDalamudPlugin
     private const uint MountRouletteGeneralActionId = 9;
     private const uint DismountGeneralActionId = 23;
     private const uint DigGeneralActionId = 20;
-    private const uint RouletteMapId = 1059;
     private const uint OptimizedInteractionMapId = 12;
     private const uint RouletteExitBaseId = 2000139;
     private const float RouletteInteractionDistance = 2f;
@@ -245,6 +244,7 @@ public sealed class Plugin : IDalamudPlugin
     private int dismountUseAttemptCount;
     private DateTime wheelTeleportAcceptAt;
     private bool wheelTeleportAcceptSubmitted;
+    private string wheelTeleportAcceptedPrompt = string.Empty;
     private bool wheelWasInCombat;
     private MapLinkPayload? wheelPendingMapLink;
     private MapLinkPayload? wheelLastMapLink;
@@ -581,7 +581,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private TreasureMapRoute SelectedTreasureMapRoute => TreasureMapDefinitions.HeadTreasureMapOptions[selectedTreasureMapIndex].Route;
 
-    private bool IsRouletteMap => clientState.MapId == RouletteMapId;
+    private bool IsRouletteMap => TreasureMapDefinitions.RouletteInstanceMapIds.Contains(clientState.MapId);
 
     public bool IsRouletteMode => IsRouletteMap && activeTreasureMapRoute == TreasureMapRoute.Roulette;
 
@@ -3382,7 +3382,12 @@ public sealed class Plugin : IDalamudPlugin
         var prompt = addon->PromptText->NodeText.ToString();
         var telepo = Telepo.Instance();
         var isTeleportRequest = telepo != null && telepo->ActiveTeleportRequest;
+        var isMap12TeleportRequest = clientState.MapId == OptimizedInteractionMapId &&
+            (isTeleportRequest ||
+             prompt.Contains("传送邀请", StringComparison.Ordinal) ||
+             prompt.Contains("接受前往", StringComparison.Ordinal));
         if (!isTeleportRequest &&
+            !isMap12TeleportRequest &&
             !prompt.Contains("要返回到", StringComparison.Ordinal) &&
             !prompt.Contains("要传送到", StringComparison.Ordinal) &&
             !prompt.Contains("接受传送", StringComparison.Ordinal) &&
@@ -3395,6 +3400,13 @@ public sealed class Plugin : IDalamudPlugin
 
             ResetWheelTeleportAcceptance();
             return;
+        }
+
+        if (wheelTeleportAcceptSubmitted &&
+            !string.IsNullOrEmpty(wheelTeleportAcceptedPrompt) &&
+            !string.Equals(prompt, wheelTeleportAcceptedPrompt, StringComparison.Ordinal))
+        {
+            ResetWheelTeleportAcceptance();
         }
 
         // 接受状态只在当前传送流程等待地图切换时有效；地图 12 的特殊流程
@@ -3424,6 +3436,7 @@ public sealed class Plugin : IDalamudPlugin
         if (addon->FireCallbackInt(0))
         {
             wheelTeleportAcceptSubmitted = true;
+            wheelTeleportAcceptedPrompt = prompt;
             wheelAwaitingMapChangeAndFlag = true;
             wheelTeleportSourceMapId = clientState.MapId;
             wheelFlagReadyAt = DateTime.UtcNow.AddSeconds(1);
@@ -3440,6 +3453,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         wheelTeleportAcceptAt = default;
         wheelTeleportAcceptSubmitted = false;
+        wheelTeleportAcceptedPrompt = string.Empty;
     }
 
     private void ResetWheelMapLinkPending()
@@ -3533,7 +3547,8 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (currentMapId == OptimizedInteractionMapId || currentMapId == RouletteMapId)
+        if (currentMapId == OptimizedInteractionMapId ||
+            TreasureMapDefinitions.RouletteInstanceMapIds.Contains(currentMapId))
         {
             wheelAwaitingMapChangeAndFlag = false;
             wheelTeleportAcceptSubmitted = false;
@@ -4308,7 +4323,10 @@ public sealed class Plugin : IDalamudPlugin
             AutoTreasureHuntStatus = "转盘：已脱离战斗并执行 /bmrai off，正在检查本轮全部宝箱。";
         }
 
-        var rouletteChests = objectTable.Where(IsTreasureChest).ToArray();
+        // 只有仍可选中的宝箱才阻止退出；已交互、不可选中或正在消失的实体不再阻塞退出点。
+        var rouletteChests = objectTable
+            .Where(gameObject => IsTreasureChest(gameObject) && gameObject.IsTargetable)
+            .ToArray();
         var chest = rouletteChests.FirstOrDefault(gameObject =>
             !rouletteInteractedChestEntities.Contains(gameObject.EntityId));
         if (chest != null)
@@ -4368,6 +4386,7 @@ public sealed class Plugin : IDalamudPlugin
 
         var exit = objectTable.FirstOrDefault(gameObject =>
             gameObject.BaseId == RouletteExitBaseId &&
+            gameObject.IsTargetable &&
             !rouletteInteractedEntities.Contains(gameObject.EntityId));
         if (exit != null)
         {
@@ -4381,7 +4400,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private void TryHandleRouletteExitTest()
     {
-        if (!IsHeadLogicSelected)
+        if (!IsHeadLogicSelected || condition[ConditionFlag.InCombat])
         {
             return;
         }
@@ -4402,6 +4421,7 @@ public sealed class Plugin : IDalamudPlugin
 
         var exit = objectTable.FirstOrDefault(gameObject =>
             gameObject.BaseId == RouletteExitBaseId &&
+            gameObject.IsTargetable &&
             !rouletteInteractedEntities.Contains(gameObject.EntityId));
         if (exit == null)
         {
