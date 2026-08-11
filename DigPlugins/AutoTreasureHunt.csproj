@@ -9,10 +9,10 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>AutoTreasureHunt</AssemblyName>
     <RootNamespace>AutoTreasureHunt</RootNamespace>
-    <Version>1.0.4.7</Version>
-    <AssemblyVersion>1.0.4.7</AssemblyVersion>
-    <FileVersion>1.0.4.7</FileVersion>
-    <InformationalVersion>1.0.4.7</InformationalVersion>
+    <Version>1.0.4.8</Version>
+    <AssemblyVersion>1.0.4.8</AssemblyVersion>
+    <FileVersion>1.0.4.8</FileVersion>
+    <InformationalVersion>1.0.4.8</InformationalVersion>
     <AssemblyTitle>海豹助手</AssemblyTitle>
     <Product>海豹助手</Product>
     <DalamudLibPath Condition="'$(DalamudLibPath)' == ''">C:\Users\admin\.nuget\packages\aeassist.net\1.2.15\lib\net10.0</DalamudLibPath>

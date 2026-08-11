@@ -81,7 +81,11 @@ public sealed class Plugin : IDalamudPlugin
     private static readonly TimeSpan MarketBoardOpenStabilizationDelay = TimeSpan.FromSeconds(2);
     private const string DeveloperCredentialHash = "6b7e18dffccc763c26914ff41a8782c1d60ec9155d86bcefeaef65c75b88b5ec";
     private const string AdvancedCredentialHash = "b517162f99cbf9966d8e5e412e44f52dbe0f59683c820d8748f544f3c8391818";
-    private const string LicenseValidationEndpoint = "https://cino-license.3118311515.workers.dev/v1/validate";
+    private const string PrimaryLicenseValidationEndpoint = "https://1466827323-7rwdj63720.ap-shanghai.tencentscf.com/v1/validate";
+    private const string FallbackLicenseValidationEndpoint = "https://cino-license.3118311515.workers.dev/v1/validate";
+    private const string PrimaryLicenseHealthEndpoint = "https://1466827323-7rwdj63720.ap-shanghai.tencentscf.com/health";
+    private const string FallbackLicenseHealthEndpoint = "https://cino-license.3118311515.workers.dev/health";
+    private const string LicenseValidationEndpoint = PrimaryLicenseValidationEndpoint;
     private static readonly HttpClient LicenseHttpClient = new() { Timeout = TimeSpan.FromSeconds(10) };
     private static readonly GameInventoryType[] MainInventoryTypes =
     [
@@ -529,14 +533,33 @@ public sealed class Plugin : IDalamudPlugin
     {
         try
         {
-            using var response = await LicenseHttpClient.GetAsync(
-                "https://cino-license.3118311515.workers.dev/health");
-            validationServerConnected = response.IsSuccessStatusCode;
-        }
-        catch (Exception ex)
-        {
+            var healthEndpoints = new[]
+            {
+                PrimaryLicenseHealthEndpoint,
+                FallbackLicenseHealthEndpoint,
+            };
+
+            foreach (var endpoint in healthEndpoints)
+            {
+                try
+                {
+                    using var response = await LicenseHttpClient.GetAsync(endpoint);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        validationServerConnected = true;
+                        return;
+                    }
+
+                    log.Warning("License validation health check returned {StatusCode} from {Endpoint}.",
+                        (int)response.StatusCode, endpoint);
+                }
+                catch (Exception ex)
+                {
+                    log.Warning(ex, "License validation health check failed for {Endpoint}.", endpoint);
+                }
+            }
+
             validationServerConnected = false;
-            log.Warning(ex, "Validation server health check failed.");
         }
         finally
         {
@@ -831,6 +854,10 @@ public sealed class Plugin : IDalamudPlugin
             return false;
         }
 
+        return await ValidateCredentialWithFallbackAsync(
+            hash, credential.Trim(), accountId.ToString());
+
+        /*
         try
         {
             using var response = await LicenseHttpClient.PostAsJsonAsync(
@@ -878,6 +905,172 @@ public sealed class Plugin : IDalamudPlugin
             credentialValidationError = "未连接至验证服务器";
             return false;
         }
+        */
+    }
+
+    /*
+    private async Task<bool> ValidateCredentialAgainstEndpointsAsync(
+        string hash, string credential, string accountId)
+    {
+        var endpoints = new[]
+        {
+            PrimaryLicenseValidationEndpoint,
+            FallbackLicenseValidationEndpoint,
+        };
+
+        for (var index = 0; index < endpoints.Length; index++)
+        {
+            var endpoint = endpoints[index];
+            try
+            {
+                using var response = await LicenseHttpClient.PostAsJsonAsync(
+                    endpoint,
+                    new { credential, accountId });
+
+                if ((int)response.StatusCode >= 500 && index == 0)
+                {
+                    log.Warning("Primary license server returned {StatusCode}; trying Cloudflare fallback.",
+                        (int)response.StatusCode);
+                    continue;
+                }
+
+                await using var stream = await response.Content.ReadAsStreamAsync();
+                using var document = await JsonDocument.ParseAsync(stream);
+                var root = document.RootElement;
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    credentialValidationError = root.TryGetProperty("error", out var error)
+                        && error.ValueKind == JsonValueKind.String
+                        && error.GetString() == "credential_bound_to_another_account"
+                        ? "鍑瘉缁戝畾鐨勪笉鏄璐﹀彿"
+                        : "鍑瘉鏃犳晥";
+                    return false;
+                }
+
+                if (!root.TryGetProperty("ok", out var ok) || !ok.GetBoolean() ||
+                    !root.TryGetProperty("role", out var roleElement))
+                {
+                    credentialValidationError = "鍑瘉鏃犳晥";
+                    return false;
+                }
+
+                var serverRole = roleElement.GetString() switch
+                {
+                    "user" => CredentialRole.User,
+                    "advanced" => CredentialRole.Advanced,
+                    "developer" => CredentialRole.Developer,
+                    _ => CredentialRole.None,
+                };
+
+                if (serverRole == CredentialRole.None)
+                {
+                    credentialValidationError = "鍑瘉鏃犳晥";
+                    return false;
+                }
+
+                SetValidatedCredential(hash, serverRole);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                log.Warning(ex, "License validation request failed for {Endpoint}.", endpoint);
+                if (index == 0)
+                {
+                    log.Warning("Primary license server unavailable; trying Cloudflare fallback.");
+                    continue;
+                }
+
+                credentialValidationError = "鏈繛鎺ヨ嚦楠岃瘉鏈嶅姟鍣?;
+                return false;
+            }
+        }
+
+        credentialValidationError = "鏈繛鎺ヨ嚦楠岃瘉鏈嶅姟鍣?;
+        return false;
+    }
+
+    */
+
+    private async Task<bool> ValidateCredentialWithFallbackAsync(
+        string hash, string credential, string accountId)
+    {
+        var endpoints = new[]
+        {
+            PrimaryLicenseValidationEndpoint,
+            FallbackLicenseValidationEndpoint,
+        };
+
+        for (var index = 0; index < endpoints.Length; index++)
+        {
+            var endpoint = endpoints[index];
+            try
+            {
+                using var response = await LicenseHttpClient.PostAsJsonAsync(
+                    endpoint,
+                    new { credential, accountId });
+
+                if ((int)response.StatusCode >= 500 && index == 0)
+                {
+                    log.Warning("Primary license server returned {StatusCode}; trying fallback.",
+                        (int)response.StatusCode);
+                    continue;
+                }
+
+                await using var stream = await response.Content.ReadAsStreamAsync();
+                using var document = await JsonDocument.ParseAsync(stream);
+                var root = document.RootElement;
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    credentialValidationError = root.TryGetProperty("error", out var error)
+                        && error.ValueKind == JsonValueKind.String
+                        && error.GetString() == "credential_bound_to_another_account"
+                        ? "Credential is bound to another account"
+                        : "Invalid credential";
+                    return false;
+                }
+
+                if (!root.TryGetProperty("ok", out var ok) || !ok.GetBoolean() ||
+                    !root.TryGetProperty("role", out var roleElement))
+                {
+                    credentialValidationError = "Invalid credential";
+                    return false;
+                }
+
+                var serverRole = roleElement.GetString() switch
+                {
+                    "user" => CredentialRole.User,
+                    "advanced" => CredentialRole.Advanced,
+                    "developer" => CredentialRole.Developer,
+                    _ => CredentialRole.None,
+                };
+
+                if (serverRole == CredentialRole.None)
+                {
+                    credentialValidationError = "Invalid credential";
+                    return false;
+                }
+
+                SetValidatedCredential(hash, serverRole);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                log.Warning(ex, "License validation request failed for {Endpoint}.", endpoint);
+                if (index == 0)
+                {
+                    log.Warning("Primary license server unavailable; trying fallback.");
+                    continue;
+                }
+
+                credentialValidationError = "Validation server unavailable";
+                return false;
+            }
+        }
+
+        credentialValidationError = "Validation server unavailable";
+        return false;
     }
 
     private void SetValidatedCredential(string hash, CredentialRole role)
