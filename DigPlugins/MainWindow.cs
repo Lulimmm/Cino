@@ -192,7 +192,9 @@ public sealed class MainWindow
             mapSupplementMaxUnitPriceObserved = mapSupplementMaxUnitPrice;
         }
 
-        if (ImGui.InputText("补图最高单价", ref mapSupplementMaxUnitPriceInput, 32))
+        ImGui.InputText("补图最高单价", ref mapSupplementMaxUnitPriceInput, 32,
+            ImGuiInputTextFlags.CharsDecimal | ImGuiInputTextFlags.EnterReturnsTrue);
+        if (ImGui.IsItemDeactivatedAfterEdit() || ImGui.IsItemDeactivated())
         {
             var normalizedPrice = mapSupplementMaxUnitPriceInput
                 .Replace(",", string.Empty, StringComparison.Ordinal)
