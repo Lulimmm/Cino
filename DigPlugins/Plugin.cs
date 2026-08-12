@@ -499,7 +499,9 @@ public sealed class Plugin : IDalamudPlugin
     public bool HasAdvancedCommandCredential =>
         sessionCredentialRole is CredentialRole.Advanced or CredentialRole.Developer;
 
-    public bool HasSavedCredential => GetCredentialRole(configuration.CredentialHash) != CredentialRole.None;
+    public bool HasSavedCredential =>
+        !string.IsNullOrWhiteSpace(configuration.SavedCredential) ||
+        GetCredentialRole(configuration.CredentialHash) != CredentialRole.None;
 
     public string CredentialRoleName => sessionCredentialRole switch
     {
@@ -670,6 +672,14 @@ public sealed class Plugin : IDalamudPlugin
 
     public uint SelectedTaskTreasureMapItemId => TreasureMapDefinitions.HeadTreasureMapOptions[selectedTreasureMapIndex].TaskItemId;
 
+    public int MapSupplementMaxUnitPrice => Math.Max(1, configuration.MapSupplementMaxUnitPrice);
+
+    public void SetMapSupplementMaxUnitPrice(int value)
+    {
+        configuration.MapSupplementMaxUnitPrice = Math.Clamp(value, 1, 999999999);
+        pluginInterface.SavePluginConfig(configuration);
+    }
+
     public string SelectedTreasureMapRouteName => TreasureMapDefinitions.HeadTreasureMapOptions[selectedTreasureMapIndex].Route switch
     {
         TreasureMapRoute.Roulette => "转盘",
@@ -822,7 +832,7 @@ public sealed class Plugin : IDalamudPlugin
         // Developer and advanced credentials remain permanent local credentials.
         if (role is CredentialRole.Developer or CredentialRole.Advanced)
         {
-            SetValidatedCredential(hash, role);
+            SetValidatedCredential(hash, role, credential.Trim());
             return true;
         }
 
@@ -883,7 +893,7 @@ public sealed class Plugin : IDalamudPlugin
                 return false;
             }
 
-            SetValidatedCredential(hash, serverRole);
+            SetValidatedCredential(hash, serverRole, credential);
             return true;
         }
         catch (Exception ex)
@@ -894,11 +904,13 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    private void SetValidatedCredential(string hash, CredentialRole role)
+    private void SetValidatedCredential(string hash, CredentialRole role, string? credential = null)
     {
         sessionCredentialRole = role;
         configuration.CredentialHash = hash;
         configuration.CredentialRole = role;
+        if (!string.IsNullOrWhiteSpace(credential))
+            configuration.SavedCredential = credential.Trim();
         pluginInterface.SavePluginConfig(configuration);
     }
 
@@ -910,11 +922,15 @@ public sealed class Plugin : IDalamudPlugin
             : 0;
     }
 
-    public bool ValidateRememberedCredential()
+    public async Task<bool> ValidateRememberedCredentialAsync()
     {
+        var savedCredential = configuration.SavedCredential?.Trim() ?? string.Empty;
+        if (!string.IsNullOrEmpty(savedCredential))
+            return await ValidateCredentialAsync(savedCredential);
+
         sessionCredentialRole = GetCredentialRole(configuration.CredentialHash);
         configuration.CredentialRole = sessionCredentialRole;
-        return sessionCredentialRole != CredentialRole.None;
+        return sessionCredentialRole is CredentialRole.Developer or CredentialRole.Advanced;
     }
 
     public void ClearCredential()
@@ -2158,6 +2174,14 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             }
 
+            if (marketPurchaseAutomatic &&
+                purchase.UnitPrice > MapSupplementMaxUnitPrice)
+            {
+                HandleUnaffordableMapSupplement(
+                    $"{marketPurchaseItemName}最低报价 {purchase.UnitPrice:N0} 金币，超过补图最高单价 {MapSupplementMaxUnitPrice:N0} 金币。");
+                return;
+            }
+
             if (marketSubmittedListingIds.Contains(purchase.ListingId))
             {
                 TryRetryMarketPricePage($"卫月仍返回本轮已经提交过的{marketPurchaseItemName}报价，正在等待市场刷新。" );
@@ -2296,6 +2320,32 @@ public sealed class Plugin : IDalamudPlugin
         {
             TeleportTestStatus = failure;
         }
+    }
+
+    private void HandleUnaffordableMapSupplement(string reason)
+    {
+        RefreshTreasureMapCounts();
+        var hasSelectedMap = HasTreasureMap || HasTaskTreasureMap;
+        var resumeAutoHunt = mapSupplementResumeAutoHunt && IsAutoTreasureHuntEnabled;
+
+        FailMarketPurchase($"补图已停止：{reason}");
+
+        if (!resumeAutoHunt)
+            return;
+
+        if (!hasSelectedMap)
+        {
+            SetAutoTreasureHuntEnabled(false);
+            AutoTreasureHuntStatus = $"补图已停止：{reason}没有价格符合上限的地图，且当前没有可用地图，已关闭自动挖宝。";
+            TeleportTestStatus = AutoTreasureHuntStatus;
+            return;
+        }
+
+        AutoTreasureHuntStatus = $"补图已停止：{reason}当前已有地图，结束补图并继续野外挖宝。";
+        TeleportTestStatus = AutoTreasureHuntStatus;
+        _ = framework.RunOnTick(
+            StartAutoTreasureHuntOnFrameworkThread,
+            delay: TimeSpan.FromSeconds(1));
     }
 
     private void TryStartAutomaticMapSupplement()

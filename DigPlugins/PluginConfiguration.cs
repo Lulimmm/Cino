@@ -8,9 +8,13 @@ public sealed class PluginConfiguration : IPluginConfiguration
 
     public string CredentialHash { get; set; } = string.Empty;
 
+    public string SavedCredential { get; set; } = string.Empty;
+
     public CredentialRole CredentialRole { get; set; }
 
     public bool AutoMapSupplementEnabled { get; set; }
+
+    public int MapSupplementMaxUnitPrice { get; set; } = 100000;
 
     public TreasureHuntLogicMode LogicMode { get; set; } = TreasureHuntLogicMode.Head;
 

@@ -126,7 +126,7 @@ public sealed class MainWindow
         credentialValidationInProgress = true;
         credentialStatus = "验证中…";
         var validated = credentialInput == RememberedCredentialMask
-            ? plugin.ValidateRememberedCredential()
+            ? await plugin.ValidateRememberedCredentialAsync()
             : await plugin.ValidateCredentialAsync(credentialInput);
         credentialValidationInProgress = false;
 
@@ -168,6 +168,12 @@ public sealed class MainWindow
         }
 
         var autoMapSupplementEnabled = plugin.IsAutoMapSupplementEnabled;
+        var mapSupplementMaxUnitPrice = plugin.MapSupplementMaxUnitPrice;
+        if (ImGui.InputInt("补图最高单价", ref mapSupplementMaxUnitPrice))
+        {
+            plugin.SetMapSupplementMaxUnitPrice(mapSupplementMaxUnitPrice);
+        }
+        ImGui.TextWrapped("仅补图自动购买生效，报价大于此值时停止购买");
         if (ImGui.Checkbox("自动补图", ref autoMapSupplementEnabled))
         {
             plugin.SetAutoMapSupplementEnabled(autoMapSupplementEnabled);
