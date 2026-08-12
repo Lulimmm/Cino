@@ -1,6 +1,11 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Plugin;
+using Dalamud.Interface.Textures;
+using Dalamud.Interface.Textures.TextureWraps;
+using Dalamud.Plugin.Services;
+using Lumina.Excel.Sheets;
+using System.Globalization;
 
 namespace AutoTreasureHunt;
 
@@ -12,16 +17,27 @@ public sealed class MainWindow
 
     private readonly Plugin plugin;
     private readonly IDalamudPluginInterface pluginInterface;
+    private readonly IDataManager dataManager;
+    private readonly ITextureProvider textureProvider;
+    private readonly Dictionary<uint, ISharedImmediateTexture?> mapIconCache = new();
     private bool isOpen = true;
     private string credentialInput = string.Empty;
     private string credentialStatus = string.Empty;
     private bool credentialValidationInProgress;
     private string navigationBaseIdInput = "2013860";
+    private string mapSupplementMaxUnitPriceInput = string.Empty;
+    private int mapSupplementMaxUnitPriceObserved;
 
-    public MainWindow(Plugin plugin, IDalamudPluginInterface pluginInterface)
+    public MainWindow(
+        Plugin plugin,
+        IDalamudPluginInterface pluginInterface,
+        IDataManager dataManager,
+        ITextureProvider textureProvider)
     {
         this.plugin = plugin;
         this.pluginInterface = pluginInterface;
+        this.dataManager = dataManager;
+        this.textureProvider = textureProvider;
     }
 
     public void Open()
@@ -169,9 +185,26 @@ public sealed class MainWindow
 
         var autoMapSupplementEnabled = plugin.IsAutoMapSupplementEnabled;
         var mapSupplementMaxUnitPrice = plugin.MapSupplementMaxUnitPrice;
-        if (ImGui.InputInt("补图最高单价", ref mapSupplementMaxUnitPrice))
+        if (mapSupplementMaxUnitPriceObserved != mapSupplementMaxUnitPrice ||
+            string.IsNullOrEmpty(mapSupplementMaxUnitPriceInput))
         {
-            plugin.SetMapSupplementMaxUnitPrice(mapSupplementMaxUnitPrice);
+            mapSupplementMaxUnitPriceInput = mapSupplementMaxUnitPrice.ToString("N0", CultureInfo.InvariantCulture);
+            mapSupplementMaxUnitPriceObserved = mapSupplementMaxUnitPrice;
+        }
+
+        if (ImGui.InputText("补图最高单价", ref mapSupplementMaxUnitPriceInput, 32))
+        {
+            var normalizedPrice = mapSupplementMaxUnitPriceInput
+                .Replace(",", string.Empty, StringComparison.Ordinal)
+                .Replace("，", string.Empty, StringComparison.Ordinal)
+                .Trim();
+            if (int.TryParse(normalizedPrice, NumberStyles.None, CultureInfo.InvariantCulture, out var parsedPrice))
+            {
+                plugin.SetMapSupplementMaxUnitPrice(parsedPrice);
+                mapSupplementMaxUnitPriceObserved = plugin.MapSupplementMaxUnitPrice;
+                mapSupplementMaxUnitPriceInput = mapSupplementMaxUnitPriceObserved
+                    .ToString("N0", CultureInfo.InvariantCulture);
+            }
         }
         ImGui.TextWrapped("仅补图自动购买生效，报价大于此值时停止购买");
         if (ImGui.Checkbox("自动补图", ref autoMapSupplementEnabled))
@@ -450,6 +483,8 @@ public sealed class MainWindow
         for (var index = 0; index < plugin.TreasureMapOptionCount; index++)
         {
             var optionName = plugin.GetTreasureMapOptionName(index);
+            DrawItemIcon(plugin.GetTreasureMapOptionItemId(index), 32);
+            ImGui.SameLine();
             var selected = index == plugin.SelectedTreasureMapIndex;
             if (ImGui.Selectable(optionName, selected))
             {
@@ -463,6 +498,27 @@ public sealed class MainWindow
         }
 
         ImGui.EndCombo();
+    }
+
+    private void DrawItemIcon(uint itemId, float size)
+    {
+        var iconId = dataManager.GetExcelSheet<Item>().GetRowOrDefault(itemId)?.Icon ?? 0;
+        if (iconId == 0)
+        {
+            ImGui.Dummy(new System.Numerics.Vector2(size, size));
+            return;
+        }
+
+        if (!mapIconCache.TryGetValue(iconId, out var texture))
+        {
+            texture = textureProvider.GetFromGameIcon(new GameIconLookup(iconId));
+            mapIconCache[iconId] = texture;
+        }
+
+        if (texture != null && texture.TryGetWrap(out var wrap, out _))
+            ImGui.Image(wrap.Handle, new System.Numerics.Vector2(size, size));
+        else
+            ImGui.Dummy(new System.Numerics.Vector2(size, size));
     }
 
     private static void DrawPluginStatus(string name, string purpose, bool isRunning)

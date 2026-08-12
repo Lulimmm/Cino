@@ -388,7 +388,7 @@ public sealed class Plugin : IDalamudPlugin
         openMarketAnywhere = new OpenMarketAnywhere(framework, gameGui, log, interop, marketBoard, dataManager, textureProvider);
 
         ValidateSavedCredential();
-        mainWindow = new MainWindow(this, this.pluginInterface);
+        mainWindow = new MainWindow(this, this.pluginInterface, dataManager, textureProvider);
         this.gameInventory.InventoryChanged += OnInventoryChanged;
         this.chatGui.ChatMessage += OnChatMessage;
         this.clientState.ZoneInit += OnZoneInit;
@@ -688,6 +688,8 @@ public sealed class Plugin : IDalamudPlugin
     };
 
     public string GetTreasureMapOptionName(int index) => TreasureMapDefinitions.HeadTreasureMapOptions[index].Name;
+
+    public uint GetTreasureMapOptionItemId(int index) => TreasureMapDefinitions.HeadTreasureMapOptions[index].MapItemId;
 
     public event Action<bool>? VnavmeshRunningChanged;
 
