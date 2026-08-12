@@ -4,14 +4,14 @@
   "Punchline": "\u5904\u7406\u4e00\u4e9b\u7406\u4e8b",
   "Description": "\u81ea\u52a8\u5904\u7406\u85cf\u5b9d\u56fe\u3001\u8865\u56fe\u3001\u4f20\u9001\u548c\u5bfb\u8def\u6d41\u7a0b\u3002",
   "InternalName": "AutoTreasureHunt",
-  "AssemblyVersion": "1.0.4.8",
+  "AssemblyVersion": "1.0.4.9",
   "ApplicableVersion": "any",
   "Tags": [
     "\u6316\u5b9d",
     "\u81ea\u52a8"
   ],
   "RepoUrl": "https://github.com/Lulimmm/Cino",
-  "IconUrl": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/DigPlugins/icon-v1.png?plugin=AutoTreasureHunt-1.0.4.8",
+  "IconUrl": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/DigPlugins/icon-v1.png?plugin=AutoTreasureHunt-1.0.4.9",
   "DalamudApiLevel": 15,
   "LoadRequiredState": 0,
   "LoadSync": false,

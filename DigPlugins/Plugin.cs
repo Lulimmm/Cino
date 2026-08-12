@@ -81,11 +81,8 @@ public sealed class Plugin : IDalamudPlugin
     private static readonly TimeSpan MarketBoardOpenStabilizationDelay = TimeSpan.FromSeconds(2);
     private const string DeveloperCredentialHash = "6b7e18dffccc763c26914ff41a8782c1d60ec9155d86bcefeaef65c75b88b5ec";
     private const string AdvancedCredentialHash = "b517162f99cbf9966d8e5e412e44f52dbe0f59683c820d8748f544f3c8391818";
-    private const string PrimaryLicenseValidationEndpoint = "https://1466827323-7rwdj63720.ap-shanghai.tencentscf.com/v1/validate";
-    private const string FallbackLicenseValidationEndpoint = "https://cino-license.3118311515.workers.dev/v1/validate";
-    private const string PrimaryLicenseHealthEndpoint = "https://1466827323-7rwdj63720.ap-shanghai.tencentscf.com/health";
-    private const string FallbackLicenseHealthEndpoint = "https://cino-license.3118311515.workers.dev/health";
-    private const string LicenseValidationEndpoint = PrimaryLicenseValidationEndpoint;
+    private const string LicenseValidationEndpoint = "https://1466827323-7rwdj63720.ap-shanghai.tencentscf.com/v1/validate";
+    private const string LicenseHealthEndpoint = "https://1466827323-7rwdj63720.ap-shanghai.tencentscf.com/health";
     private static readonly HttpClient LicenseHttpClient = new() { Timeout = TimeSpan.FromSeconds(10) };
     private static readonly GameInventoryType[] MainInventoryTypes =
     [
@@ -271,6 +268,10 @@ public sealed class Plugin : IDalamudPlugin
     private uint wheelFlagSnapshotMapId;
     private float wheelFlagSnapshotX;
     private float wheelFlagSnapshotY;
+    private int wheelFlagRound;
+    private int wheelLastProcessedRound = -1;
+    private bool wheelWaitingForFreshFlag;
+    private bool wheelPreviousFlagCompleted;
     private bool rouletteModeActive;
     private bool rouletteWasInCombat;
     private ulong rouletteTargetEntityId;
@@ -533,33 +534,13 @@ public sealed class Plugin : IDalamudPlugin
     {
         try
         {
-            var healthEndpoints = new[]
+            using var response = await LicenseHttpClient.GetAsync(LicenseHealthEndpoint);
+            validationServerConnected = response.IsSuccessStatusCode;
+            if (!response.IsSuccessStatusCode)
             {
-                PrimaryLicenseHealthEndpoint,
-                FallbackLicenseHealthEndpoint,
-            };
-
-            foreach (var endpoint in healthEndpoints)
-            {
-                try
-                {
-                    using var response = await LicenseHttpClient.GetAsync(endpoint);
-                    if (response.IsSuccessStatusCode)
-                    {
-                        validationServerConnected = true;
-                        return;
-                    }
-
-                    log.Warning("License validation health check returned {StatusCode} from {Endpoint}.",
-                        (int)response.StatusCode, endpoint);
-                }
-                catch (Exception ex)
-                {
-                    log.Warning(ex, "License validation health check failed for {Endpoint}.", endpoint);
-                }
+                log.Warning("License validation health check returned {StatusCode}.",
+                    (int)response.StatusCode);
             }
-
-            validationServerConnected = false;
         }
         finally
         {
@@ -854,32 +835,37 @@ public sealed class Plugin : IDalamudPlugin
             return false;
         }
 
-        return await ValidateCredentialWithFallbackAsync(
+        return await ValidateCredentialAgainstServerAsync(
             hash, credential.Trim(), accountId.ToString());
+    }
 
-        /*
+    private async Task<bool> ValidateCredentialAgainstServerAsync(
+        string hash, string credential, string accountId)
+    {
         try
         {
             using var response = await LicenseHttpClient.PostAsJsonAsync(
                 LicenseValidationEndpoint,
-                new { credential = credential.Trim(), accountId = accountId.ToString() });
+                new { credential, accountId });
+
             await using var stream = await response.Content.ReadAsStreamAsync();
             using var document = await JsonDocument.ParseAsync(stream);
             var root = document.RootElement;
+
             if (!response.IsSuccessStatusCode)
             {
                 credentialValidationError = root.TryGetProperty("error", out var error)
                     && error.ValueKind == JsonValueKind.String
                     && error.GetString() == "credential_bound_to_another_account"
-                    ? "凭证绑定的不是此账号"
-                    : "凭证无效";
+                    ? "Credential is bound to another account"
+                    : "Invalid credential";
                 return false;
             }
 
             if (!root.TryGetProperty("ok", out var ok) || !ok.GetBoolean() ||
                 !root.TryGetProperty("role", out var roleElement))
             {
-                credentialValidationError = "凭证无效";
+                credentialValidationError = "Invalid credential";
                 return false;
             }
 
@@ -890,9 +876,10 @@ public sealed class Plugin : IDalamudPlugin
                 "developer" => CredentialRole.Developer,
                 _ => CredentialRole.None,
             };
+
             if (serverRole == CredentialRole.None)
             {
-                credentialValidationError = "凭证无效";
+                credentialValidationError = "Invalid credential";
                 return false;
             }
 
@@ -901,176 +888,10 @@ public sealed class Plugin : IDalamudPlugin
         }
         catch (Exception ex)
         {
-            log.Warning(ex, "Cloudflare credential validation request failed.");
-            credentialValidationError = "未连接至验证服务器";
+            log.Warning(ex, "Tencent Cloud license validation request failed.");
+            credentialValidationError = "Validation server unavailable";
             return false;
         }
-        */
-    }
-
-    /*
-    private async Task<bool> ValidateCredentialAgainstEndpointsAsync(
-        string hash, string credential, string accountId)
-    {
-        var endpoints = new[]
-        {
-            PrimaryLicenseValidationEndpoint,
-            FallbackLicenseValidationEndpoint,
-        };
-
-        for (var index = 0; index < endpoints.Length; index++)
-        {
-            var endpoint = endpoints[index];
-            try
-            {
-                using var response = await LicenseHttpClient.PostAsJsonAsync(
-                    endpoint,
-                    new { credential, accountId });
-
-                if ((int)response.StatusCode >= 500 && index == 0)
-                {
-                    log.Warning("Primary license server returned {StatusCode}; trying Cloudflare fallback.",
-                        (int)response.StatusCode);
-                    continue;
-                }
-
-                await using var stream = await response.Content.ReadAsStreamAsync();
-                using var document = await JsonDocument.ParseAsync(stream);
-                var root = document.RootElement;
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    credentialValidationError = root.TryGetProperty("error", out var error)
-                        && error.ValueKind == JsonValueKind.String
-                        && error.GetString() == "credential_bound_to_another_account"
-                        ? "鍑瘉缁戝畾鐨勪笉鏄璐﹀彿"
-                        : "鍑瘉鏃犳晥";
-                    return false;
-                }
-
-                if (!root.TryGetProperty("ok", out var ok) || !ok.GetBoolean() ||
-                    !root.TryGetProperty("role", out var roleElement))
-                {
-                    credentialValidationError = "鍑瘉鏃犳晥";
-                    return false;
-                }
-
-                var serverRole = roleElement.GetString() switch
-                {
-                    "user" => CredentialRole.User,
-                    "advanced" => CredentialRole.Advanced,
-                    "developer" => CredentialRole.Developer,
-                    _ => CredentialRole.None,
-                };
-
-                if (serverRole == CredentialRole.None)
-                {
-                    credentialValidationError = "鍑瘉鏃犳晥";
-                    return false;
-                }
-
-                SetValidatedCredential(hash, serverRole);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                log.Warning(ex, "License validation request failed for {Endpoint}.", endpoint);
-                if (index == 0)
-                {
-                    log.Warning("Primary license server unavailable; trying Cloudflare fallback.");
-                    continue;
-                }
-
-                credentialValidationError = "鏈繛鎺ヨ嚦楠岃瘉鏈嶅姟鍣?;
-                return false;
-            }
-        }
-
-        credentialValidationError = "鏈繛鎺ヨ嚦楠岃瘉鏈嶅姟鍣?;
-        return false;
-    }
-
-    */
-
-    private async Task<bool> ValidateCredentialWithFallbackAsync(
-        string hash, string credential, string accountId)
-    {
-        var endpoints = new[]
-        {
-            PrimaryLicenseValidationEndpoint,
-            FallbackLicenseValidationEndpoint,
-        };
-
-        for (var index = 0; index < endpoints.Length; index++)
-        {
-            var endpoint = endpoints[index];
-            try
-            {
-                using var response = await LicenseHttpClient.PostAsJsonAsync(
-                    endpoint,
-                    new { credential, accountId });
-
-                if ((int)response.StatusCode >= 500 && index == 0)
-                {
-                    log.Warning("Primary license server returned {StatusCode}; trying fallback.",
-                        (int)response.StatusCode);
-                    continue;
-                }
-
-                await using var stream = await response.Content.ReadAsStreamAsync();
-                using var document = await JsonDocument.ParseAsync(stream);
-                var root = document.RootElement;
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    credentialValidationError = root.TryGetProperty("error", out var error)
-                        && error.ValueKind == JsonValueKind.String
-                        && error.GetString() == "credential_bound_to_another_account"
-                        ? "Credential is bound to another account"
-                        : "Invalid credential";
-                    return false;
-                }
-
-                if (!root.TryGetProperty("ok", out var ok) || !ok.GetBoolean() ||
-                    !root.TryGetProperty("role", out var roleElement))
-                {
-                    credentialValidationError = "Invalid credential";
-                    return false;
-                }
-
-                var serverRole = roleElement.GetString() switch
-                {
-                    "user" => CredentialRole.User,
-                    "advanced" => CredentialRole.Advanced,
-                    "developer" => CredentialRole.Developer,
-                    _ => CredentialRole.None,
-                };
-
-                if (serverRole == CredentialRole.None)
-                {
-                    credentialValidationError = "Invalid credential";
-                    return false;
-                }
-
-                SetValidatedCredential(hash, serverRole);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                log.Warning(ex, "License validation request failed for {Endpoint}.", endpoint);
-                if (index == 0)
-                {
-                    log.Warning("Primary license server unavailable; trying fallback.");
-                    continue;
-                }
-
-                credentialValidationError = "Validation server unavailable";
-                return false;
-            }
-        }
-
-        credentialValidationError = "Validation server unavailable";
-        return false;
     }
 
     private void SetValidatedCredential(string hash, CredentialRole role)
@@ -3641,9 +3462,9 @@ public sealed class Plugin : IDalamudPlugin
         {
             wheelAwaitingMapChangeAndFlag = true;
             wheelNewFlagPending = true;
+            wheelWaitingForFreshFlag = true;
             wheelTeleportSourceMapId = clientState.MapId;
             wheelFlagReadyAt = DateTime.UtcNow.AddSeconds(1);
-            wheelFlagRefreshRequestedAt = DateTime.UtcNow;
             wheelFlagRefreshRequestedAt = DateTime.UtcNow;
             WheelMapLinkStatus = $"已打开 {mapLink.PlaceName} {mapLink.CoordinateString}，等待游戏设置红旗。";
             AutoTreasureHuntStatus = "车轮：已根据聊天地图链接设置红旗。";
@@ -3758,6 +3579,7 @@ public sealed class Plugin : IDalamudPlugin
             wheelTeleportAcceptSubmitted = true;
             wheelTeleportAcceptedPrompt = prompt;
             wheelAwaitingMapChangeAndFlag = true;
+            wheelWaitingForFreshFlag = true;
             wheelTeleportSourceMapId = clientState.MapId;
             wheelFlagReadyAt = DateTime.UtcNow.AddSeconds(1);
             AutoTreasureHuntStatus = "车轮：已接受传送请求。";
@@ -3780,6 +3602,8 @@ public sealed class Plugin : IDalamudPlugin
     {
         wheelPendingMapLink = null;
         wheelNewFlagPending = false;
+        wheelWaitingForFreshFlag = false;
+        wheelPreviousFlagCompleted = false;
         wheelFlagSnapshotValid = false;
         wheelFlagRefreshRequestedAt = default;
         wheelAwaitingMapChangeAndFlag = false;
@@ -3793,10 +3617,23 @@ public sealed class Plugin : IDalamudPlugin
         navigationMovementObserved = false;
     }
 
+    private void ResetWheelFlagRoundForMap12()
+    {
+        // 地图 12 是流程起点：只归零轮次状态，不清除已经提交的传送接受状态。
+        wheelFlagRound = 0;
+        wheelLastProcessedRound = -1;
+        wheelWaitingForFreshFlag = true;
+        wheelPreviousFlagCompleted = false;
+        wheelFlagSnapshotValid = false;
+        wheelFlagRefreshRequestedAt = DateTime.UtcNow;
+    }
+
     private unsafe void TryHandleWheelPostTeleport()
     {
         if (!wheelAwaitingMapChangeAndFlag ||
             !wheelNewFlagPending ||
+            !wheelWaitingForFreshFlag ||
+            wheelPreviousFlagCompleted && wheelLastProcessedRound == wheelFlagRound ||
             wheelLastMapLink == null ||
             emergencyStopActive)
         {
@@ -3870,6 +3707,10 @@ public sealed class Plugin : IDalamudPlugin
         if (currentMapId == OptimizedInteractionMapId ||
             TreasureMapDefinitions.RouletteInstanceMapIds.Contains(currentMapId))
         {
+            wheelFlagRound++;
+            wheelLastProcessedRound = wheelFlagRound;
+            wheelWaitingForFreshFlag = false;
+            wheelPreviousFlagCompleted = true;
             wheelAwaitingMapChangeAndFlag = false;
             wheelTeleportAcceptSubmitted = false;
             wheelTeleportSourceMapId = 0;
@@ -3883,6 +3724,10 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         wheelAwaitingMapChangeAndFlag = false;
+        wheelFlagRound++;
+        wheelLastProcessedRound = wheelFlagRound;
+        wheelWaitingForFreshFlag = false;
+        wheelPreviousFlagCompleted = true;
         wheelTeleportAcceptSubmitted = false;
         wheelTeleportSourceMapId = 0;
         mountAfterTeleportPending = true;
@@ -3900,6 +3745,11 @@ public sealed class Plugin : IDalamudPlugin
         _ = framework.RunOnFrameworkThread(() =>
         {
             UpdateOptimizedInteractionForMap(mapId);
+
+            if (IsWheelLogicSelected && mapId == OptimizedInteractionMapId)
+            {
+                ResetWheelFlagRoundForMap12();
+            }
 
             if (!IsHeadLogicSelected ||
                 !IsCredentialValidated ||
@@ -5695,8 +5545,8 @@ public sealed class Plugin : IDalamudPlugin
 
                 if (headFlagPartyReadyAt == default)
                 {
-                    headFlagPartyReadyAt = DateTime.UtcNow.AddSeconds(2);
-                    TeleportTestStatus = "车头与所有队友已处于同一地图且对象已加载，等待 2 秒后发送红旗。";
+                    headFlagPartyReadyAt = DateTime.UtcNow;
+                    TeleportTestStatus = "车头与所有队友已处于同一地图且对象已加载，立即发送红旗。";
                     SchedulePendingHeadFlagAnnouncement(TimeSpan.FromMilliseconds(250));
                     return;
                 }
