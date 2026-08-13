@@ -183,7 +183,14 @@ public sealed class MainWindow
             return;
         }
 
+        DrawDoorSelectionSettings();
+
         var autoMapSupplementEnabled = plugin.IsAutoMapSupplementEnabled;
+        var maxUnitPriceEnabled = plugin.IsMapSupplementMaxUnitPriceEnabled;
+        if (ImGui.Checkbox("启用补图最高单价", ref maxUnitPriceEnabled))
+        {
+            plugin.SetMapSupplementMaxUnitPriceEnabled(maxUnitPriceEnabled);
+        }
         var mapSupplementMaxUnitPrice = plugin.MapSupplementMaxUnitPrice;
         if (mapSupplementMaxUnitPriceObserved != mapSupplementMaxUnitPrice ||
             string.IsNullOrEmpty(mapSupplementMaxUnitPriceInput))
@@ -192,8 +199,10 @@ public sealed class MainWindow
             mapSupplementMaxUnitPriceObserved = mapSupplementMaxUnitPrice;
         }
 
+        ImGui.BeginDisabled(!maxUnitPriceEnabled);
         ImGui.InputText("补图最高单价", ref mapSupplementMaxUnitPriceInput, 32,
             ImGuiInputTextFlags.CharsDecimal | ImGuiInputTextFlags.EnterReturnsTrue);
+        ImGui.EndDisabled();
         if (ImGui.IsItemDeactivatedAfterEdit() || ImGui.IsItemDeactivated())
         {
             var normalizedPrice = mapSupplementMaxUnitPriceInput
@@ -229,16 +238,43 @@ public sealed class MainWindow
         DrawRuntimeEnvironment();
     }
 
+    private void DrawDoorSelectionSettings()
+    {
+        ImGui.Spacing();
+        ImGui.Text("选门方向");
+        DrawDoorChoice("第一层 → 第二层", 0);
+        DrawDoorChoice("第二层 → 第三层", 1);
+        DrawDoorChoice("第三层 → 第四层", 2);
+        DrawDoorChoice("第四层 → 第五层", 3);
+    }
+
+    private void DrawDoorChoice(string label, int floor)
+    {
+        var value = plugin.GetDoorSelectionChoice(floor);
+        var options = new[] { "左门", "右门" };
+        ImGui.SetNextItemWidth(120);
+        if (ImGui.BeginCombo($"{label}###DoorChoice{floor}", options[(int)value]))
+        {
+            for (var i = 0; i < options.Length; i++)
+            {
+                var selected = i == (int)value;
+                if (ImGui.Selectable(options[i], selected))
+                    plugin.SetDoorSelectionChoice(floor, (DoorSelectionChoice)i);
+                if (selected)
+                    ImGui.SetItemDefaultFocus();
+            }
+            ImGui.EndCombo();
+        }
+    }
+
     private void DrawRuntimeEnvironment()
     {
         ImGui.Spacing();
         ImGui.Text("运行环境");
         DrawPluginStatus("vnavmesh", "自动寻路", plugin.IsVnavmeshRunning);
-        DrawPluginStatus("globetrotter", "藏宝图坐标解析", plugin.IsGlobetrotterRunning);
         DrawPluginStatus("BossMod Reborn", "副本机制处理", plugin.IsBossModRebornRunning);
 
         var allReady = plugin.IsVnavmeshRunning &&
-                       plugin.IsGlobetrotterRunning &&
                        plugin.IsBossModRebornRunning;
         ImGui.TextColored(
             allReady ? RunningColor : StoppedColor,
@@ -248,9 +284,7 @@ public sealed class MainWindow
         {
             var missingPlugin = !plugin.IsVnavmeshRunning
                 ? "vnavmesh"
-                : !plugin.IsGlobetrotterRunning
-                    ? "globetrotter"
-                    : "BossModReborn";
+                : "BossModReborn";
             pluginInterface.OpenPluginInstallerTo(searchText: missingPlugin);
         }
     }
@@ -271,7 +305,24 @@ public sealed class MainWindow
         {
             plugin.TestListNonTargetableObjects();
         }
+        ImGui.SameLine();
+        if (ImGui.Button("获取特效中心 XYZ"))
+        {
+            plugin.TestCaptureEffectCenter();
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("扫描 VFX 特效结构"))
+        {
+            plugin.TestProbeVfxEffectCenter();
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("获取场地标记 XYZ"))
+        {
+            plugin.TestCaptureFieldMarker();
+        }
         ImGui.TextWrapped(plugin.InteractableObjectScanStatus);
+        ImGui.TextWrapped(plugin.EffectCenterTestStatus);
+        ImGui.TextWrapped(plugin.FieldMarkerTestStatus);
 
         ImGui.SetNextItemWidth(180);
         ImGui.InputText("目标 BaseID###NavigationBaseId", ref navigationBaseIdInput, 16);

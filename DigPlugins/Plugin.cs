@@ -136,6 +136,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly PluginConfiguration configuration;
     private readonly CoordinateApplier coordinateApplier;
     private readonly OpenMarketAnywhere openMarketAnywhere;
+    private readonly GlobetrotterTreasureMapCore globetrotterTreasureMapCore;
+    private readonly VfxEffectCenterProbe vfxEffectCenterProbe;
     private CredentialRole sessionCredentialRole;
     private bool validationServerCheckInProgress;
     private DateTime validationServerLastCheckedAt;
@@ -243,6 +245,23 @@ public sealed class Plugin : IDalamudPlugin
     private bool doorSelectionPostCombatChestPending;
     private DateTime doorSelectionDutyReadyAt;
     private bool doorSelectionWasInCombat;
+    private bool doorSelectionPostCombatChestHandled;
+    private int doorSelectionFloor;
+    private ulong doorSelectionDoorEntityId;
+    private bool doorSelectionDoorMoveIssued;
+    private DateTime doorSelectionDoorAnimationUntil;
+    private bool doorSelectionVfxMoveIssued;
+    private System.Numerics.Vector3 doorSelectionVfxPosition;
+    private int wheelDoorSelectionFloor;
+    private uint wheelDoorSelectionDoorBaseId;
+    private ulong wheelDoorSelectionDoorEntityId;
+    private bool wheelDoorSelectionDoorMoveIssued;
+    private System.Numerics.Vector3 wheelDoorSelectionVfxPosition;
+    private bool wheelDoorSelectionVfxMoveIssued;
+    private DateTime wheelDoorSelectionAnimationUntil;
+    private uint wheelDoorSelectionLastMapId;
+    private ulong wheelDoorSelectionChestEntityId;
+    private bool wheelDoorSelectionChestMoveIssued;
     private int decipherRetryCount;
     private bool decipherRetryQueued;
     private bool questDecipherRetryQueued;
@@ -258,6 +277,7 @@ public sealed class Plugin : IDalamudPlugin
     private bool wheelWasInCombat;
     private MapLinkPayload? wheelPendingMapLink;
     private MapLinkPayload? wheelLastMapLink;
+    private DateTime wheelPendingMapLinkDeadline;
     private bool wheelAwaitingMapChangeAndFlag;
     private uint wheelTeleportSourceMapId;
     private DateTime wheelFlagReadyAt;
@@ -360,6 +380,7 @@ public sealed class Plugin : IDalamudPlugin
         IMarketBoard marketBoard,
         IPluginLog log,
         IGameInteropProvider interop,
+        ISigScanner sigScanner,
         ITextureProvider textureProvider)
     {
         this.pluginInterface = pluginInterface;
@@ -386,6 +407,17 @@ public sealed class Plugin : IDalamudPlugin
 
         coordinateApplier = new CoordinateApplier(objectTable, SaveConfiguration);
         openMarketAnywhere = new OpenMarketAnywhere(framework, gameGui, log, interop, marketBoard, dataManager, textureProvider);
+        globetrotterTreasureMapCore = new GlobetrotterTreasureMapCore(
+            dataManager,
+            gameGui,
+            sigScanner,
+            interop,
+            log,
+            showOnHover: () => !CheckGlobetrotterRunning(),
+            showOnOpen: () => !CheckGlobetrotterRunning(),
+            showOnDecipher: () => !CheckGlobetrotterRunning());
+        vfxEffectCenterProbe = new VfxEffectCenterProbe(sigScanner, log);
+        gameGui.HoveredItemChanged += globetrotterTreasureMapCore.OnHover;
 
         ValidateSavedCredential();
         mainWindow = new MainWindow(this, this.pluginInterface, dataManager, textureProvider);
@@ -404,6 +436,10 @@ public sealed class Plugin : IDalamudPlugin
         commandManager.AddHandler("/llmarket", new CommandInfo(OnLlMarketCommand)
         {
             HelpMessage = "测试打开市场：/llmarket",
+        });
+        commandManager.AddHandler("/tmap", new CommandInfo(OnTmapCommand)
+        {
+            HelpMessage = "打开当前任务地图并设置红旗",
         });
         _ = this.framework.RunOnTick(
             InitializeRuntimeState,
@@ -579,6 +615,10 @@ public sealed class Plugin : IDalamudPlugin
 
     public string BaseIdNavigationTestStatus { get; private set; } = "尚未测试按 BaseID 坐标寻路。";
 
+    public string EffectCenterTestStatus { get; private set; } = "尚未获取特效中心坐标。";
+
+    public string FieldMarkerTestStatus { get; private set; } = "尚未获取场地标记坐标。";
+
     public string OtherPluginTestStatus { get; private set; } = "OtherPlugin feature not tested yet.";
 
     public string OtherPluginMarketStatus => openMarketAnywhere.Status;
@@ -674,9 +714,39 @@ public sealed class Plugin : IDalamudPlugin
 
     public int MapSupplementMaxUnitPrice => Math.Max(1, configuration.MapSupplementMaxUnitPrice);
 
+    public bool IsMapSupplementMaxUnitPriceEnabled => configuration.MapSupplementMaxUnitPriceEnabled;
+
+    public void SetMapSupplementMaxUnitPriceEnabled(bool enabled)
+    {
+        configuration.MapSupplementMaxUnitPriceEnabled = enabled;
+        pluginInterface.SavePluginConfig(configuration);
+    }
+
     public void SetMapSupplementMaxUnitPrice(int value)
     {
         configuration.MapSupplementMaxUnitPrice = Math.Clamp(value, 1, 999999999);
+        pluginInterface.SavePluginConfig(configuration);
+    }
+
+    public DoorSelectionChoice GetDoorSelectionChoice(int floor) => floor switch
+    {
+        0 => configuration.DoorSelectionFloor1To2,
+        1 => configuration.DoorSelectionFloor2To3,
+        2 => configuration.DoorSelectionFloor3To4,
+        3 => configuration.DoorSelectionFloor4To5,
+        _ => DoorSelectionChoice.Left,
+    };
+
+    public void SetDoorSelectionChoice(int floor, DoorSelectionChoice choice)
+    {
+        switch (floor)
+        {
+            case 0: configuration.DoorSelectionFloor1To2 = choice; break;
+            case 1: configuration.DoorSelectionFloor2To3 = choice; break;
+            case 2: configuration.DoorSelectionFloor3To4 = choice; break;
+            case 3: configuration.DoorSelectionFloor4To5 = choice; break;
+            default: return;
+        }
         pluginInterface.SavePluginConfig(configuration);
     }
 
@@ -707,9 +777,24 @@ public sealed class Plugin : IDalamudPlugin
         gameInventory.InventoryChanged -= OnInventoryChanged;
         chatGui.ChatMessage -= OnChatMessage;
         openMarketAnywhere.Dispose();
+        gameGui.HoveredItemChanged -= globetrotterTreasureMapCore.OnHover;
+        globetrotterTreasureMapCore.Dispose();
         commandManager.RemoveHandler("/lltp");
         commandManager.RemoveHandler("/llmarket");
+        commandManager.RemoveHandler("/tmap");
     }
+
+    private void OnTmapCommand(string command, string arguments)
+    {
+        if (CheckGlobetrotterRunning())
+        {
+            AutoTreasureHuntStatus = "外部 Globetrotter 已启用，已禁用 DigPlugin 内置藏宝图核心。";
+            return;
+        }
+
+        globetrotterTreasureMapCore.OpenCurrentMapLocation();
+    }
+
 
     public void SetAutoTreasureHuntEnabled(bool enabled)
     {
@@ -733,8 +818,17 @@ public sealed class Plugin : IDalamudPlugin
             }
             else
             {
-                wheelWasInCombat = false;
-                ResetWheelTeleportAcceptance();
+        wheelWasInCombat = false;
+        wheelDoorSelectionFloor = 1;
+        wheelDoorSelectionDoorBaseId = 0;
+        wheelDoorSelectionDoorEntityId = 0;
+        wheelDoorSelectionDoorMoveIssued = false;
+        wheelDoorSelectionVfxMoveIssued = false;
+        wheelDoorSelectionAnimationUntil = default;
+        wheelDoorSelectionLastMapId = 0;
+        wheelDoorSelectionChestEntityId = 0;
+        wheelDoorSelectionChestMoveIssued = false;
+        ResetWheelTeleportAcceptance();
                 ResetWheelMapLinkPending();
                 AutoTreasureHuntStatus = "车轮逻辑已开启，正在等待传送请求。";
             }
@@ -869,15 +963,15 @@ public sealed class Plugin : IDalamudPlugin
                 credentialValidationError = root.TryGetProperty("error", out var error)
                     && error.ValueKind == JsonValueKind.String
                     && error.GetString() == "credential_bound_to_another_account"
-                    ? "Credential is bound to another account"
-                    : "Invalid credential";
+                    ? "凭证绑定的不是此账号"
+                    : "凭证无效";
                 return false;
             }
 
             if (!root.TryGetProperty("ok", out var ok) || !ok.GetBoolean() ||
                 !root.TryGetProperty("role", out var roleElement))
             {
-                credentialValidationError = "Invalid credential";
+                credentialValidationError = "凭证无效";
                 return false;
             }
 
@@ -891,7 +985,7 @@ public sealed class Plugin : IDalamudPlugin
 
             if (serverRole == CredentialRole.None)
             {
-                credentialValidationError = "Invalid credential";
+                credentialValidationError = "凭证无效";
                 return false;
             }
 
@@ -901,7 +995,7 @@ public sealed class Plugin : IDalamudPlugin
         catch (Exception ex)
         {
             log.Warning(ex, "Tencent Cloud license validation request failed.");
-            credentialValidationError = "Validation server unavailable";
+            credentialValidationError = "未连接至验证服务器";
             return false;
         }
     }
@@ -1462,6 +1556,93 @@ public sealed class Plugin : IDalamudPlugin
         TestListObjects(targetable: false, "不可右键选中物体");
     }
 
+    public void TestCaptureEffectCenter()
+    {
+        EffectCenterTestStatus = "正在扫描附近对象表，查找特效中心实体...";
+        _ = framework.RunOnFrameworkThread(() =>
+        {
+            var localPlayer = objectTable.LocalPlayer;
+            if (localPlayer == null)
+            {
+                EffectCenterTestStatus = "当前无法取得角色对象，无法扫描特效中心。";
+                return;
+            }
+
+            var candidates = objectTable
+                .Where(gameObject => gameObject.EntityId != 0 &&
+                    System.Numerics.Vector3.DistanceSquared(gameObject.Position, localPlayer.Position) <= 40f * 40f)
+                .OrderBy(gameObject => !string.Equals(gameObject.ObjectKind.ToString(), "EventObj", StringComparison.OrdinalIgnoreCase))
+                .ThenBy(gameObject => System.Numerics.Vector3.DistanceSquared(gameObject.Position, localPlayer.Position))
+                .ToList();
+
+            var candidate = candidates.FirstOrDefault(gameObject =>
+                string.Equals(gameObject.ObjectKind.ToString(), "EventObj", StringComparison.OrdinalIgnoreCase))
+                ?? candidates.FirstOrDefault(gameObject => !gameObject.IsTargetable);
+            if (candidate == null)
+            {
+                EffectCenterTestStatus = "对象表中没有特效实体（无 EntityID、BaseID、可选中状态）。该目标属于场景特效/区域触发器，卫月 IObjectTable 无法提供真实 XYZ；未使用玩家坐标替代。";
+                PrintEcho(EffectCenterTestStatus);
+                return;
+            }
+
+            var position = candidate.Position;
+            EffectCenterTestStatus = string.Format(
+                System.Globalization.CultureInfo.InvariantCulture,
+                "已找到特效候选：XYZ {0:F3}, {1:F3}, {2:F3}；EntityID {3}；BaseID {4}；类型 {5}；可选中 {6}",
+                position.X, position.Y, position.Z, candidate.EntityId, candidate.BaseId,
+                candidate.ObjectKind, candidate.IsTargetable);
+            PrintEcho(EffectCenterTestStatus);
+        });
+    }
+
+    public void TestCaptureFieldMarker()
+    {
+        FieldMarkerTestStatus = "正在读取当前地图的场地标记...";
+        _ = framework.RunOnFrameworkThread(TestCaptureFieldMarkerOnFrameworkThread);
+    }
+
+    public void TestProbeVfxEffectCenter()
+    {
+        EffectCenterTestStatus = "正在扫描当前客户端的 VFX/场景特效结构...";
+        _ = framework.RunOnFrameworkThread(() =>
+        {
+            var localPlayer = objectTable.LocalPlayer;
+            if (localPlayer == null)
+            {
+                EffectCenterTestStatus = "当前没有角色对象，无法确定最近 VFX 候选。";
+                return;
+            }
+
+            EffectCenterTestStatus = vfxEffectCenterProbe.Capture(localPlayer.Position);
+            PrintEcho(EffectCenterTestStatus);
+        });
+    }
+
+    private unsafe void TestCaptureFieldMarkerOnFrameworkThread()
+    {
+        var mapAgent = AgentMap.Instance();
+        if (mapAgent == null || mapAgent->FlagMarkerCount == 0)
+        {
+            FieldMarkerTestStatus = "当前没有可读取的场地地图标记（AgentMap.FlagMarkerCount=0）。未使用玩家坐标替代。";
+            PrintEcho(FieldMarkerTestStatus);
+            return;
+        }
+
+        var marker = mapAgent->FlagMapMarkers[0];
+        if (marker.TerritoryId == 0 || marker.MapId == 0)
+        {
+            FieldMarkerTestStatus = "检测到场地标记数据，但区域或地图 ID 无效，无法换算 XYZ。";
+            PrintEcho(FieldMarkerTestStatus);
+            return;
+        }
+
+        FieldMarkerTestStatus = string.Format(
+            System.Globalization.CultureInfo.InvariantCulture,
+            "已读取场地地图标记：区域 {0}，地图 {1}，X {2:F3}，Y {3:F3}（Z 轴不在 AgentMap 标记数据中）。",
+            marker.TerritoryId, marker.MapId, marker.XFloat, marker.YFloat);
+        PrintEcho(FieldMarkerTestStatus);
+    }
+
     public void TestNavigateToBaseId(string baseIdText)
     {
         ResumeAfterEmergencyStop();
@@ -1680,6 +1861,12 @@ public sealed class Plugin : IDalamudPlugin
         doorSelectionModeActive = false;
         doorSelectionInstanceMapId = 0;
         doorSelectionWasInCombat = false;
+        doorSelectionPostCombatChestHandled = false;
+        doorSelectionFloor = 1;
+        doorSelectionDoorEntityId = 0;
+        doorSelectionDoorMoveIssued = false;
+        doorSelectionDoorAnimationUntil = default;
+        doorSelectionVfxMoveIssued = false;
         ResetDoorSelectionChestState(resetCompleted: true);
 
         marketBoardAfterTeleportPending = false;
@@ -2177,6 +2364,7 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             if (marketPurchaseAutomatic &&
+                IsMapSupplementMaxUnitPriceEnabled &&
                 purchase.UnitPrice > MapSupplementMaxUnitPrice)
             {
                 HandleUnaffordableMapSupplement(
@@ -3306,6 +3494,7 @@ public sealed class Plugin : IDalamudPlugin
 
             TryProcessWheelMapLink();
             TryHandleWheelLogic();
+            TryHandleWheelDoorSelection();
             TryHandleWheelPostTeleport();
             TryDismountAtFlag();
             return;
@@ -3480,6 +3669,8 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        TryCaptureWheelDoorSelectionMessage(message);
+
         var mapLink = message.Message.Payloads
             .OfType<MapLinkPayload>()
             .FirstOrDefault();
@@ -3496,8 +3687,29 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         wheelPendingMapLink = CloneMapLink(mapLink);
+        wheelPendingMapLinkDeadline = DateTime.UtcNow.AddSeconds(20);
         WheelMapLinkStatus = $"检测到聊天地图链接：{mapLink.PlaceName} {mapLink.CoordinateString}，准备设置红旗。";
         AutoTreasureHuntStatus = $"车轮：检测到聊天地图链接 {mapLink.PlaceName} {mapLink.CoordinateString}，正在获取红旗。";
+    }
+
+    private void TryCaptureWheelDoorSelectionMessage(IChatMessage message)
+    {
+        var text = message.Message.TextValue;
+        const string prefix = "<digdoor:896:";
+        var start = text.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+        if (start < 0)
+            return;
+        var end = text.IndexOf('>', start + prefix.Length);
+        if (end < 0 || !uint.TryParse(text[(start + prefix.Length)..end], out var baseId) || baseId == 0)
+            return;
+
+        wheelDoorSelectionDoorBaseId = baseId;
+        wheelDoorSelectionFloor = Math.Clamp(wheelDoorSelectionFloor, 1, 5);
+        wheelDoorSelectionDoorEntityId = 0;
+        wheelDoorSelectionDoorMoveIssued = false;
+        wheelDoorSelectionAnimationUntil = DateTime.UtcNow.AddSeconds(2);
+        wheelDoorSelectionVfxMoveIssued = false;
+        AutoTreasureHuntStatus = $"车轮：收到车头第 {wheelDoorSelectionFloor} 层门信息（BaseID {baseId}），等待门动画结束。";
     }
 
     private unsafe void TryProcessWheelMapLink()
@@ -3507,11 +3719,27 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        if (condition[ConditionFlag.BetweenAreas] ||
+            condition[ConditionFlag.BetweenAreas51])
+        {
+            return;
+        }
+
+        if (wheelPendingMapLinkDeadline != default &&
+            DateTime.UtcNow >= wheelPendingMapLinkDeadline)
+        {
+            WheelMapLinkStatus = "车轮：红旗地图链接等待超时，将继续等待下一条红旗。";
+            wheelPendingMapLink = null;
+            wheelPendingMapLinkDeadline = default;
+            return;
+        }
+
         var mapLink = wheelPendingMapLink;
-        wheelPendingMapLink = null;
         CaptureWheelFlagSnapshot();
         if (gameGui.OpenMapWithMapLink(mapLink))
         {
+            wheelPendingMapLink = null;
+            wheelPendingMapLinkDeadline = default;
             wheelAwaitingMapChangeAndFlag = true;
             wheelNewFlagPending = true;
             wheelWaitingForFreshFlag = true;
@@ -3523,7 +3751,7 @@ public sealed class Plugin : IDalamudPlugin
         }
         else
         {
-            WheelMapLinkStatus = $"打开 {mapLink.PlaceName} {mapLink.CoordinateString} 失败，将等待下一条聊天地图链接。";
+            WheelMapLinkStatus = $"打开 {mapLink.PlaceName} {mapLink.CoordinateString} 暂未成功，将保留并重试当前红旗。";
         }
     }
 
@@ -3650,9 +3878,114 @@ public sealed class Plugin : IDalamudPlugin
         wheelTeleportAcceptedPrompt = string.Empty;
     }
 
+    private void TryHandleWheelDoorSelection()
+    {
+        if (!IsWheelLogicSelected || clientState.MapId != 896 || wheelDoorSelectionFloor >= 5)
+            return;
+
+        if (wheelDoorSelectionLastMapId != clientState.MapId)
+        {
+            wheelDoorSelectionLastMapId = clientState.MapId;
+            wheelDoorSelectionFloor = 1;
+            wheelDoorSelectionDoorBaseId = 0;
+            wheelDoorSelectionDoorEntityId = 0;
+            wheelDoorSelectionDoorMoveIssued = false;
+            wheelDoorSelectionVfxMoveIssued = false;
+            wheelDoorSelectionChestEntityId = 0;
+            wheelDoorSelectionChestMoveIssued = false;
+        }
+
+        if (condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51] ||
+            condition[ConditionFlag.Casting] || condition[ConditionFlag.OccupiedInQuestEvent])
+            return;
+
+        var localPlayer = objectTable.LocalPlayer;
+        if (localPlayer == null)
+            return;
+
+        // Wheel follows the head to the current-floor chest but never interacts.
+        if (wheelDoorSelectionDoorBaseId == 0 && !wheelDoorSelectionVfxMoveIssued)
+        {
+            var chest = objectTable.FirstOrDefault(o => TreasureMapDefinitions.DoorSelectionInitialChestBaseIds.Contains(o.BaseId));
+            if (chest == null)
+                return;
+            if (wheelDoorSelectionChestEntityId != chest.EntityId)
+            {
+                wheelDoorSelectionChestEntityId = chest.EntityId;
+                wheelDoorSelectionChestMoveIssued = false;
+            }
+            if (!wheelDoorSelectionChestMoveIssued)
+            {
+                var chestCommand = FormattableString.Invariant($"/vnav moveto {chest.Position.X:F3} {chest.Position.Y:F3} {chest.Position.Z:F3}");
+                wheelDoorSelectionChestMoveIssued = commandManager.ProcessCommand(chestCommand);
+            }
+            return;
+        }
+
+        if (wheelDoorSelectionAnimationUntil != default && DateTime.UtcNow < wheelDoorSelectionAnimationUntil)
+            return;
+
+        if (wheelDoorSelectionDoorEntityId == 0)
+        {
+            var door = objectTable.FirstOrDefault(o => o.BaseId == wheelDoorSelectionDoorBaseId && o.IsTargetable);
+            if (door == null)
+            {
+                AutoTreasureHuntStatus = $"车轮：等待车头门实体出现（BaseID {wheelDoorSelectionDoorBaseId}）。";
+                return;
+            }
+            wheelDoorSelectionDoorEntityId = door.EntityId;
+            wheelDoorSelectionDoorMoveIssued = false;
+        }
+
+        var targetDoor = objectTable.FirstOrDefault(o => o.EntityId == wheelDoorSelectionDoorEntityId);
+        if (targetDoor == null)
+        {
+            wheelDoorSelectionDoorEntityId = 0;
+            wheelDoorSelectionDoorMoveIssued = false;
+            return;
+        }
+
+        if (!wheelDoorSelectionDoorMoveIssued)
+        {
+            var command = FormattableString.Invariant($"/vnav moveto {targetDoor.Position.X:F3} {targetDoor.Position.Y:F3} {targetDoor.Position.Z:F3}");
+            wheelDoorSelectionDoorMoveIssued = commandManager.ProcessCommand(command);
+            return;
+        }
+
+        if (System.Numerics.Vector3.DistanceSquared(localPlayer.Position, targetDoor.Position) > 2.5f * 2.5f)
+            return;
+
+        commandManager.ProcessCommand("/vnav stop");
+        if (!wheelDoorSelectionVfxMoveIssued)
+        {
+            if (!vfxEffectCenterProbe.TryGetNearestPosition(localPlayer.Position, out wheelDoorSelectionVfxPosition, out _))
+            {
+                AutoTreasureHuntStatus = "车轮：已到达车头选择的门，等待最近 VFX 中心出现。";
+                return;
+            }
+
+            var command = FormattableString.Invariant($"/vnav moveto {wheelDoorSelectionVfxPosition.X:F3} {wheelDoorSelectionVfxPosition.Y:F3} {wheelDoorSelectionVfxPosition.Z:F3}");
+            wheelDoorSelectionVfxMoveIssued = commandManager.ProcessCommand(command);
+            return;
+        }
+
+        if (System.Numerics.Vector3.DistanceSquared(localPlayer.Position, wheelDoorSelectionVfxPosition) > 2.5f * 2.5f)
+            return;
+
+        commandManager.ProcessCommand("/vnav stop");
+        wheelDoorSelectionFloor++;
+        wheelDoorSelectionDoorBaseId = 0;
+        wheelDoorSelectionDoorEntityId = 0;
+        wheelDoorSelectionDoorMoveIssued = false;
+        wheelDoorSelectionVfxMoveIssued = false;
+        wheelDoorSelectionAnimationUntil = default;
+        AutoTreasureHuntStatus = $"车轮：已到达 VFX 中心并确认仍可移动，当前记录为第 {wheelDoorSelectionFloor} 层，等待车头继续处理宝箱。";
+    }
+
     private void ResetWheelMapLinkPending()
     {
         wheelPendingMapLink = null;
+        wheelPendingMapLinkDeadline = default;
         wheelNewFlagPending = false;
         wheelWaitingForFreshFlag = false;
         wheelPreviousFlagCompleted = false;
@@ -3692,12 +4025,6 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (!wheelTeleportAcceptSubmitted)
-        {
-            AutoTreasureHuntStatus = "车轮：已获取新红旗，等待接受传送邀请后再进行寻路。";
-            return;
-        }
-
         if (condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51])
         {
             AutoTreasureHuntStatus = "车轮：已接受传送，正在等待地图切换完成。";
@@ -3709,6 +4036,24 @@ public sealed class Plugin : IDalamudPlugin
         {
             AutoTreasureHuntStatus = "车轮：等待传送后的地图 ID 变更。";
             return;
+        }
+
+        // 同地图红旗无需等待传送确认；跨地图仍必须先接受传送。
+        var telepo = Telepo.Instance();
+        var hasActiveTeleportRequest = telepo != null && telepo->ActiveTeleportRequest;
+        var flagBelongsToCurrentMap = currentMapId == wheelLastMapLink.Map.RowId &&
+            clientState.TerritoryType == wheelLastMapLink.TerritoryType.RowId;
+        if (!wheelTeleportAcceptSubmitted &&
+            (!flagBelongsToCurrentMap || hasActiveTeleportRequest))
+        {
+            AutoTreasureHuntStatus = "车轮：已获取新红旗，等待接受传送邀请后再进行寻路。";
+            return;
+        }
+
+        if (!wheelTeleportAcceptSubmitted && flagBelongsToCurrentMap)
+        {
+            wheelTeleportAcceptSubmitted = true;
+            wheelTeleportSourceMapId = currentMapId;
         }
 
         if (wheelFlagReadyAt != default && DateTime.UtcNow < wheelFlagReadyAt)
@@ -3733,6 +4078,17 @@ public sealed class Plugin : IDalamudPlugin
         {
             AutoTreasureHuntStatus = "车轮：已检测到红旗，但红旗尚未匹配当前地图。";
             return;
+        }
+
+        // 红旗已经匹配当前地图但旧快照未被游戏清除时，最多等待 3 秒后放行，
+        // 避免车轮停在“已设置红旗”状态而不进入坐骑和寻路。
+        if (wheelFlagSnapshotValid &&
+            wheelFlagRefreshRequestedAt != default &&
+            DateTime.UtcNow - wheelFlagRefreshRequestedAt >= TimeSpan.FromSeconds(3))
+        {
+            wheelFlagSnapshotValid = false;
+            wheelFlagReadyAt = default;
+            AutoTreasureHuntStatus = "车轮：红旗已匹配当前地图，结束刷新等待并继续前往红旗。";
         }
 
         if (wheelFlagSnapshotValid &&
@@ -4108,6 +4464,11 @@ public sealed class Plugin : IDalamudPlugin
         doorSelectionModeActive = true;
         doorSelectionInstanceMapId = clientState.MapId;
         doorSelectionWasInCombat = false;
+        doorSelectionFloor = 1;
+        doorSelectionDoorEntityId = 0;
+        doorSelectionDoorMoveIssued = false;
+        doorSelectionDoorAnimationUntil = default;
+        doorSelectionVfxMoveIssued = false;
         ResetDoorSelectionChestState(resetCompleted: true);
         commandManager.ProcessCommand("/vnav stop");
         EnableAeAssistForTreasureInstance();
@@ -4186,12 +4547,6 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (doorSelectionInitialChestCompleted && !doorSelectionPostCombatChestPending)
-        {
-            AutoTreasureHuntStatus = "选门：初始宝箱已经确认，等待战斗开始。";
-            return;
-        }
-
         if (!dutyState.IsDutyStarted)
         {
             if (doorSelectionChestMoveIssued)
@@ -4217,6 +4572,13 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        // The fifth floor is the terminal floor; do not attempt a sixth door.
+        if (doorSelectionFloor >= 5 && doorSelectionInitialChestCompleted && !doorSelectionPostCombatChestPending)
+        {
+            AutoTreasureHuntStatus = "选门：已记录第五层，等待副本后续结束。";
+            return;
+        }
+
         TryConfirmDoorSelectionChest();
         if (confirmDoorSelectionChestPending)
         {
@@ -4227,11 +4589,20 @@ public sealed class Plugin : IDalamudPlugin
             TreasureMapDefinitions.DoorSelectionInitialChestBaseIds.Contains(gameObject.BaseId));
         if (chest == null)
         {
-            commandManager.ProcessCommand("/vnav stop");
-            ResetDoorSelectionChestTarget();
-            AutoTreasureHuntStatus = doorSelectionPostCombatChestPending
-                ? $"选门：战斗已结束，等待再次出现的宝箱（BaseID {string.Join(", ", TreasureMapDefinitions.DoorSelectionInitialChestBaseIds)}）。"
-                : $"选门：任务已开始，等待初始宝箱出现（BaseID {string.Join(", ", TreasureMapDefinitions.DoorSelectionInitialChestBaseIds)}）。";
+        if (doorSelectionInitialChestCompleted &&
+            !doorSelectionPostCombatChestPending &&
+            doorSelectionPostCombatChestHandled)
+            {
+                TryHandleDoorSelectionDoor();
+            }
+            else
+            {
+                commandManager.ProcessCommand("/vnav stop");
+                ResetDoorSelectionChestTarget();
+                AutoTreasureHuntStatus = doorSelectionPostCombatChestPending
+                    ? $"选门：战斗已结束，等待再次出现的宝箱（BaseID {string.Join(", ", TreasureMapDefinitions.DoorSelectionInitialChestBaseIds)}）。"
+                    : $"选门：任务已开始，等待初始宝箱出现（BaseID {string.Join(", ", TreasureMapDefinitions.DoorSelectionInitialChestBaseIds)}）。";
+            }
             return;
         }
 
@@ -4324,8 +4695,9 @@ public sealed class Plugin : IDalamudPlugin
         {
             doorSelectionPostCombatChestPending = false;
             doorSelectionInitialChestCompleted = true;
+            doorSelectionPostCombatChestHandled = true;
             ResetDoorSelectionChestTarget();
-            AutoTreasureHuntStatus = "选门：战斗结束后已再次寻路并交互宝箱，等待后续选门流程适配。";
+            AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层宝箱已完成，等待场上宝箱消失后选择下一扇门。";
             TeleportTestStatus = AutoTreasureHuntStatus;
             return;
         }
@@ -4333,6 +4705,122 @@ public sealed class Plugin : IDalamudPlugin
         confirmDoorSelectionChestPending = true;
         doorSelectionChestConfirmDeadline = DateTime.UtcNow.AddSeconds(10);
         AutoTreasureHuntStatus = "选门：已与初始宝箱交互，等待确认窗口。";
+    }
+
+    private void TryHandleDoorSelectionDoor()
+    {
+        if (doorSelectionFloor >= 5)
+            return;
+
+        if (doorSelectionDoorAnimationUntil != default)
+        {
+            if (DateTime.UtcNow < doorSelectionDoorAnimationUntil ||
+                condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51] ||
+                condition[ConditionFlag.OccupiedInQuestEvent] || condition[ConditionFlag.Casting])
+            {
+                AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层门动画处理中，等待移动恢复。";
+                return;
+            }
+
+            if (!doorSelectionVfxMoveIssued)
+            {
+                var player = objectTable.LocalPlayer;
+                if (player == null || !vfxEffectCenterProbe.TryGetNearestPosition(player.Position, out doorSelectionVfxPosition, out _))
+                {
+                    AutoTreasureHuntStatus = "选门：门动画已结束，但暂未找到 VFX 中心，继续等待。";
+                    return;
+                }
+
+                var command = FormattableString.Invariant($"/vnav moveto {doorSelectionVfxPosition.X:F3} {doorSelectionVfxPosition.Y:F3} {doorSelectionVfxPosition.Z:F3}");
+                doorSelectionVfxMoveIssued = commandManager.ProcessCommand(command);
+                AutoTreasureHuntStatus = doorSelectionVfxMoveIssued
+                    ? $"选门：正在前往第 {doorSelectionFloor + 1} 层 VFX 中心。"
+                    : "选门：VFX 中心寻路命令失败，正在重试。";
+                return;
+            }
+
+            var localPlayer = objectTable.LocalPlayer;
+            if (localPlayer == null || System.Numerics.Vector3.DistanceSquared(localPlayer.Position, doorSelectionVfxPosition) > 2.5f * 2.5f)
+                return;
+
+            commandManager.ProcessCommand("/vnav stop");
+            if (condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51] ||
+                condition[ConditionFlag.OccupiedInQuestEvent] || condition[ConditionFlag.Casting])
+                return;
+
+            doorSelectionFloor++;
+            doorSelectionDoorEntityId = 0;
+            doorSelectionDoorMoveIssued = false;
+            doorSelectionDoorAnimationUntil = default;
+            doorSelectionVfxMoveIssued = false;
+            doorSelectionInitialChestCompleted = false;
+            doorSelectionPostCombatChestPending = false;
+            doorSelectionPostCombatChestHandled = false;
+            doorSelectionDutyReadyAt = DateTime.UtcNow.AddSeconds(1);
+            ResetDoorSelectionChestTarget();
+            AutoTreasureHuntStatus = $"选门：已到达 VFX 中心并确认可移动，当前记录为第 {doorSelectionFloor} 层。";
+            return;
+        }
+
+        var leftIds = doorSelectionFloor switch
+        {
+            1 => TreasureMapDefinitions.DoorSelectionLeftDoorFloor1To2BaseIds,
+            2 => TreasureMapDefinitions.DoorSelectionLeftDoorFloor2To3BaseIds,
+            3 => TreasureMapDefinitions.DoorSelectionLeftDoorFloor3To4BaseIds,
+            4 => TreasureMapDefinitions.DoorSelectionLeftDoorFloor4To5BaseIds,
+            _ => []
+        };
+        var rightIds = doorSelectionFloor switch
+        {
+            1 => TreasureMapDefinitions.DoorSelectionRightDoorFloor1To2BaseIds,
+            2 => TreasureMapDefinitions.DoorSelectionRightDoorFloor2To3BaseIds,
+            3 => TreasureMapDefinitions.DoorSelectionRightDoorFloor3To4BaseIds,
+            4 => TreasureMapDefinitions.DoorSelectionRightDoorFloor4To5BaseIds,
+            _ => []
+        };
+        var selectedDoorIds = GetDoorSelectionChoice(doorSelectionFloor - 1) == DoorSelectionChoice.Left
+            ? leftIds
+            : rightIds;
+        var door = objectTable.FirstOrDefault(o => o.IsTargetable && selectedDoorIds.Contains(o.BaseId));
+        if (door == null)
+        {
+            var side = GetDoorSelectionChoice(doorSelectionFloor - 1) == DoorSelectionChoice.Left ? "左门" : "右门";
+            AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层尚未检测到已选择的{side} BaseID。";
+            return;
+        }
+
+        if (doorSelectionDoorEntityId != door.EntityId)
+        {
+            doorSelectionDoorEntityId = door.EntityId;
+            doorSelectionDoorMoveIssued = false;
+        }
+
+        var playerPosition = objectTable.LocalPlayer?.Position ?? default;
+        if (!doorSelectionDoorMoveIssued)
+        {
+            targetManager.Target = door;
+            var command = FormattableString.Invariant($"/vnav moveto {door.Position.X:F3} {door.Position.Y:F3} {door.Position.Z:F3}");
+            doorSelectionDoorMoveIssued = commandManager.ProcessCommand(command);
+            AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层正在前往{(GetDoorSelectionChoice(doorSelectionFloor - 1) == DoorSelectionChoice.Left ? "左门" : "右门")}。";
+            return;
+        }
+
+        if (System.Numerics.Vector3.DistanceSquared(playerPosition, door.Position) > 2.5f * 2.5f)
+            return;
+
+        commandManager.ProcessCommand("/vnav stop");
+        targetManager.Target = door;
+        if (InteractWithGameObject(door) == 0)
+        {
+            doorSelectionDoorMoveIssued = false;
+            AutoTreasureHuntStatus = "选门：门交互未被游戏接受，正在重试。";
+            return;
+        }
+
+        doorSelectionDoorAnimationUntil = DateTime.UtcNow.AddSeconds(2);
+        doorSelectionVfxMoveIssued = false;
+        TrySendChatBoxEntry($"/p <digdoor:896:{door.BaseId}>");
+        AutoTreasureHuntStatus = $"选门：已交互第 {doorSelectionFloor} 层门，等待动画结束。";
     }
 
     private bool TryHandleDoorSelectionCombatState()
@@ -4417,6 +4905,7 @@ public sealed class Plugin : IDalamudPlugin
         if (resetCompleted)
         {
             doorSelectionInitialChestCompleted = false;
+            doorSelectionPostCombatChestHandled = false;
         }
     }
 
@@ -4734,7 +5223,17 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         targetManager.Target = target;
-        InteractWithGameObject(target);
+        var interactionResult = InteractWithGameObject(target);
+        if (interactionResult == 0)
+        {
+            // 交互请求未被游戏接受时不能提前记为已处理，否则退出点会被永久跳过。
+            rouletteInteractedEntities.Remove(target.EntityId);
+            roulettePositionSampleValid = false;
+            rouletteExitDelayStarted = false;
+            AutoTreasureHuntStatus = $"转盘：与{targetKind}交互请求未被接受，正在重试。";
+            return;
+        }
+
         if (targetKind == "潜网巡梦")
         {
             confirmRouletteDreamPending = true;
