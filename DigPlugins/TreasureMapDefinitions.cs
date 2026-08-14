@@ -70,6 +70,22 @@ internal static class TreasureMapDefinitions
         2013860,
     ];
 
+    // 896 副本各层进入战斗前需要交互的宝箱 BaseID。
+    // 第 1 层默认使用上面的 2013860；其余楼层请按实测填写。
+    internal static readonly List<uint> DoorSelectionCombatStartChestFloor1BaseIds = [2013860,];
+    internal static readonly List<uint> DoorSelectionCombatStartChestFloor2BaseIds = [];
+    internal static readonly List<uint> DoorSelectionCombatStartChestFloor3BaseIds = [];
+    internal static readonly List<uint> DoorSelectionCombatStartChestFloor4BaseIds = [];
+    internal static readonly List<uint> DoorSelectionCombatStartChestFloor5BaseIds = [];
+
+    // 896 副本各层战斗结束后出现的宝箱 BaseID。请按实际测试结果填入；
+    // 若该层宝箱没有 BaseID，可留空并由运行时按名称“宝箱”兜底识别。
+    internal static readonly List<uint> DoorSelectionCombatChestFloor1BaseIds = [2013860];
+    internal static readonly List<uint> DoorSelectionCombatChestFloor2BaseIds = [2013861];
+    internal static readonly List<uint> DoorSelectionCombatChestFloor3BaseIds = [2013862];
+    internal static readonly List<uint> DoorSelectionCombatChestFloor4BaseIds = [2013863];
+    internal static readonly List<uint> DoorSelectionCombatChestFloor5BaseIds = [2013864];
+
     // 【选门 ID】以下列表暂为空，后续手动填入对应门的 BaseID。
     // 每组分别表示当前层到下一层的左门和右门。
     internal static readonly List<uint> DoorSelectionLeftDoorFloor1To2BaseIds = [1073757625,];

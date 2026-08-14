@@ -183,7 +183,8 @@ public sealed class MainWindow
             return;
         }
 
-        DrawDoorSelectionSettings();
+        if (plugin.IsSelectedDoorSelectionRoute)
+            DrawDoorSelectionSettings();
 
         var autoMapSupplementEnabled = plugin.IsAutoMapSupplementEnabled;
         var maxUnitPriceEnabled = plugin.IsMapSupplementMaxUnitPriceEnabled;
@@ -291,34 +292,61 @@ public sealed class MainWindow
 
     private void DrawTestPage()
     {
+        var testButtonsInRow = 0;
+        void ContinueTestButtonRow()
+        {
+            testButtonsInRow++;
+            if (testButtonsInRow >= 4 || ImGui.GetContentRegionAvail().X < 220f)
+            {
+                ImGui.NewLine();
+                testButtonsInRow = 0;
+            }
+            else
+                ImGui.SameLine();
+        }
         if (ImGui.Button("紧急停止"))
         {
             plugin.EmergencyStop();
         }
-        ImGui.SameLine();
+        ContinueTestButtonRow();
         if (ImGui.Button("测试遍历可交互物体"))
         {
             plugin.TestListInteractableObjects();
         }
-        ImGui.SameLine();
+        ContinueTestButtonRow();
         if (ImGui.Button("测试遍历不可右键选中物体"))
         {
             plugin.TestListNonTargetableObjects();
         }
-        ImGui.SameLine();
+        ContinueTestButtonRow();
         if (ImGui.Button("获取特效中心 XYZ"))
         {
             plugin.TestCaptureEffectCenter();
         }
-        ImGui.SameLine();
+        ContinueTestButtonRow();
         if (ImGui.Button("扫描 VFX 特效结构"))
         {
             plugin.TestProbeVfxEffectCenter();
         }
-        ImGui.SameLine();
+        ContinueTestButtonRow();
+        if (ImGui.Button("测试寻找无 BaseID 的 VFX"))
+        {
+            plugin.TestProbeBaseIdlessVfx();
+        }
+        ContinueTestButtonRow();
+        if (ImGui.Button("读取 VFX .avfx 路径"))
+        {
+            plugin.TestProbeVfxResourcePaths();
+        }
+        ContinueTestButtonRow();
         if (ImGui.Button("获取场地标记 XYZ"))
         {
             plugin.TestCaptureFieldMarker();
+        }
+        ContinueTestButtonRow();
+        if (ImGui.Button("Navigate to portal VFX"))
+        {
+            plugin.TestNavigateToDoorSelectionPortalVfx();
         }
         ImGui.TextWrapped(plugin.InteractableObjectScanStatus);
         ImGui.TextWrapped(plugin.EffectCenterTestStatus);
