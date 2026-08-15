@@ -34,7 +34,7 @@ internal static class TreasureMapDefinitions
     // 【选门地图】进入副本后进入“选门”空逻辑；新选门藏宝图加在此 List。
     internal static readonly List<TreasureMapOption> DoorSelectionTreasureMapOptions =
     [
-        new("陈旧的狞豹革地图（已脑测）", "狩豹革制的宝物地图", MarketSearchName: "陈旧的狞豹革地图", MapItemId: 43557, TaskItemId: 2003563, Route: TreasureMapRoute.DoorSelection),
+        new("陈旧的狞豹革地图（暂不可用）", "狩豹革制的宝物地图", MarketSearchName: "陈旧的狞豹革地图", MapItemId: 43557, TaskItemId: 2003563, Route: TreasureMapRoute.DoorSelection),
     ];
 
     // 【合并列表】界面选择、背包统计、补图购买统一使用；不直接在这里添加地图。

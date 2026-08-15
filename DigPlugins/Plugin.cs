@@ -4110,6 +4110,29 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        if (TryUseWheelDirectFlagNavigation(out var playerDistanceSquared, out var aetheryteDistanceSquared))
+        {
+            // 当前地图内步行/飞行比从最近可用水晶重新传送更近：关闭传送邀请，
+            // 直接由后续红旗流程执行坐骑和 /vnav flyflag。
+            if (wheelLastMapLink != null)
+            {
+                wheelTeleportAcceptSubmitted = true;
+                wheelTeleportAcceptedPrompt = prompt;
+                wheelAwaitingMapChangeAndFlag = true;
+                wheelWaitingForFreshFlag = true;
+                wheelTeleportSourceMapId = clientState.MapId;
+                wheelFlagReadyAt = default;
+                AutoTreasureHuntStatus = $"车轮：当前距离红旗更近（角色 {MathF.Sqrt(playerDistanceSquared):F1}，最近水晶 {MathF.Sqrt(aetheryteDistanceSquared):F1}），不传送并直接前往红旗。";
+            }
+            else
+            {
+                wheelTeleportAcceptAt = DateTime.UtcNow.AddMilliseconds(250);
+                AutoTreasureHuntStatus = "车轮：关闭较远传送邀请失败，正在重试。";
+            }
+
+            return;
+        }
+
         if (addon->FireCallbackInt(0))
         {
             wheelTeleportAcceptSubmitted = true;
@@ -4132,6 +4155,66 @@ public sealed class Plugin : IDalamudPlugin
         wheelTeleportAcceptAt = default;
         wheelTeleportAcceptSubmitted = false;
         wheelTeleportAcceptedPrompt = string.Empty;
+    }
+
+    /// <summary>
+    /// 当角色和新红旗已在同一地图时，比较角色与该地图内最近可用水晶到红旗的距离。
+    /// 只有角色严格更近时才返回 true；无法读取红旗或水晶坐标时维持原传送行为。
+    /// </summary>
+    private unsafe bool TryUseWheelDirectFlagNavigation(
+        out float playerDistanceSquared,
+        out float nearestAetheryteDistanceSquared)
+    {
+        playerDistanceSquared = float.PositiveInfinity;
+        nearestAetheryteDistanceSquared = float.PositiveInfinity;
+
+        if (wheelLastMapLink == null || objectTable.LocalPlayer == null)
+            return false;
+
+        var mapAgent = AgentMap.Instance();
+        if (mapAgent == null || mapAgent->FlagMarkerCount == 0)
+            return false;
+
+        var flag = mapAgent->FlagMapMarkers[0];
+        if (flag.MapId == 0 || flag.TerritoryId == 0 ||
+            clientState.MapId != flag.MapId ||
+            clientState.TerritoryType != flag.TerritoryId ||
+            flag.MapId != wheelLastMapLink.Map.RowId ||
+            flag.TerritoryId != wheelLastMapLink.TerritoryType.RowId)
+        {
+            return false;
+        }
+
+        var player = objectTable.LocalPlayer;
+        var playerDeltaX = player.Position.X - flag.XFloat;
+        var playerDeltaY = player.Position.Y - flag.YFloat;
+        playerDistanceSquared = playerDeltaX * playerDeltaX + playerDeltaY * playerDeltaY;
+
+        var foundPositionedAetheryte = false;
+        foreach (var entry in aetheryteList)
+        {
+            if (entry.TerritoryId != flag.TerritoryId)
+                continue;
+
+            var aetheryte = entry.AetheryteData.Value;
+            if (!aetheryte.IsAetheryte || aetheryte.Map.RowId != flag.MapId ||
+                !TryGetAetheryteWorldPosition(aetheryte, flag.MapId, out var aetheryteX, out var aetheryteY))
+            {
+                continue;
+            }
+
+            var deltaX = aetheryteX - flag.XFloat;
+            var deltaY = aetheryteY - flag.YFloat;
+            var distanceSquared = deltaX * deltaX + deltaY * deltaY;
+            if (distanceSquared < nearestAetheryteDistanceSquared)
+            {
+                nearestAetheryteDistanceSquared = distanceSquared;
+                foundPositionedAetheryte = true;
+            }
+        }
+
+        return foundPositionedAetheryte &&
+               playerDistanceSquared < nearestAetheryteDistanceSquared;
     }
 
     private void TryHandleWheelDoorSelection()
@@ -4904,6 +4987,10 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        // 初始宝箱交互后异步点击“是”。这项点击不参与阶段判断，
+        // 不会因 Yes/No 窗口暂未出现而阻塞后续的战斗状态等待。
+        TryConfirmDoorSelectionChest();
+
         // A successful Yes/No confirmation marks the initial combat chest as
         // complete. Do not search or re-interact with its BaseID while waiting
         // for the encounter to start; the post-combat chest has no BaseID.
@@ -5081,7 +5168,8 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        confirmDoorSelectionChestPending = false;
+        confirmDoorSelectionChestPending = true;
+        doorSelectionChestConfirmDeadline = DateTime.UtcNow.AddSeconds(10);
         doorSelectionInitialChestYesConfirmed = true;
         doorSelectionInitialChestCompleted = false;
         doorSelectionPostCombatChestPending = false;
@@ -5262,14 +5350,6 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        // The confirmation window itself is the phase boundary. From this
-        // point onward, only the post-combat chest without a BaseID is valid.
-        doorSelectionInitialChestYesConfirmed = true;
-        doorSelectionInitialChestCompleted = false;
-        doorSelectionPostCombatChestPending = true;
-        doorSelectionPostCombatChestHandled = false;
-        doorSelectionCombatObservedAfterYes = true;
-
         if (addon->FireCallbackInt(0))
         {
             confirmDoorSelectionChestPending = false;
@@ -5403,13 +5483,13 @@ public sealed class Plugin : IDalamudPlugin
 
         // 宝箱、潜网巡梦和它们的确认窗口都只允许在脱离战斗后处理。
         TryConfirmRouletteDream();
-        if (confirmRouletteDreamPending)
+        if (false && confirmRouletteDreamPending)
         {
             return;
         }
 
         TryConfirmRouletteExit();
-        if (confirmRouletteExitPending)
+        if (false && confirmRouletteExitPending)
         {
             return;
         }
@@ -5474,14 +5554,14 @@ public sealed class Plugin : IDalamudPlugin
             TreasureMapDefinitions.RouletteDreamBaseIds.Contains(gameObject.BaseId) &&
             gameObject.IsTargetable &&
             !rouletteInteractedEntities.Contains(gameObject.EntityId));
-        if (dream != null)
+        if (false && dream != null)
         {
             HandleRouletteTarget(dream, "潜网巡梦", TimeSpan.FromSeconds(1), confirmExit: false);
             return;
         }
 
         // 已交互过的潜网巡梦仍可能继续留在对象表中；只要它还在场，就禁止退出。
-        if (objectTable.Any(gameObject => TreasureMapDefinitions.RouletteDreamBaseIds.Contains(gameObject.BaseId)))
+        if (false && objectTable.Any(gameObject => TreasureMapDefinitions.RouletteDreamBaseIds.Contains(gameObject.BaseId)))
         {
             if (rouletteTargetKind == "退出点")
             {
@@ -5495,8 +5575,7 @@ public sealed class Plugin : IDalamudPlugin
 
         var exit = objectTable.FirstOrDefault(gameObject =>
             gameObject.BaseId == RouletteExitBaseId &&
-            gameObject.IsTargetable &&
-            !rouletteInteractedEntities.Contains(gameObject.EntityId));
+            gameObject.IsTargetable);
         if (exit != null)
         {
             HandleRouletteTarget(exit, "退出点", TimeSpan.FromSeconds(2), confirmExit: true);
@@ -6264,6 +6343,43 @@ public sealed class Plugin : IDalamudPlugin
 
         waitingForAutomaticMapFlag = false;
 
+        if (TryUseHeadDirectFlagNavigation(
+                territoryId,
+                mapId,
+                flagX,
+                flagY,
+                out var playerDistanceSquared,
+                out var aetheryteDistanceSquared))
+        {
+            // 车头已在目标地图且比最近水晶更接近红旗：跳过原有的
+            // 延迟播报、队友加载等待及 Telepo 传送，直接播报并寻路。
+            headFlagTeleportReady = false;
+            headFlagTeleportPending = false;
+            headFlagAnnouncementPending = false;
+            headFlagAnnouncementDeadline = default;
+            headFlagPartyReadyAt = default;
+
+            const float coordinateTolerance = 0.01f;
+            var alreadyAnnounced = hasAnnouncedFlag &&
+                lastAnnouncedFlagTerritoryId == territoryId &&
+                lastAnnouncedFlagMapId == mapId &&
+                MathF.Abs(lastAnnouncedFlagX - flagX) <= coordinateTolerance &&
+                MathF.Abs(lastAnnouncedFlagY - flagY) <= coordinateTolerance;
+            if (!alreadyAnnounced)
+            {
+                AnnounceFlag(territoryId, mapId, flagX, flagY, isTest: false);
+            }
+
+            mountAfterTeleportPending = true;
+            mountRetryQueued = false;
+            mountAttemptCount = 0;
+            dismountAtFlagPending = false;
+            TeleportTestStatus = $"车头：当前距离红旗更近（角色 {MathF.Sqrt(playerDistanceSquared):F1}，最近水晶 {MathF.Sqrt(aetheryteDistanceSquared):F1}），已直接播报并开始前往红旗。";
+            AutoTreasureHuntStatus = TeleportTestStatus;
+            ScheduleMountRouletteRetry();
+            return;
+        }
+
         if (!headFlagTeleportReady)
         {
             TryAnnounceNewFlag(territoryId, mapId, flagX, flagY);
@@ -6432,6 +6548,56 @@ public sealed class Plugin : IDalamudPlugin
         headPendingFlagMapId = mapId;
         headPendingFlagX = flagX;
         headPendingFlagY = flagY;
+    }
+
+    /// <summary>
+    /// 车头已处于红旗同地图时，比较角色与该地图最近可用水晶到红旗的 XY 距离。
+    /// 只有角色严格更近时才跳过传送并直接寻路。
+    /// </summary>
+    private bool TryUseHeadDirectFlagNavigation(
+        uint territoryId,
+        uint mapId,
+        float flagX,
+        float flagY,
+        out float playerDistanceSquared,
+        out float nearestAetheryteDistanceSquared)
+    {
+        playerDistanceSquared = float.PositiveInfinity;
+        nearestAetheryteDistanceSquared = float.PositiveInfinity;
+
+        var player = objectTable.LocalPlayer;
+        if (player == null || clientState.MapId != mapId || clientState.TerritoryType != territoryId)
+            return false;
+
+        var playerDeltaX = player.Position.X - flagX;
+        var playerDeltaY = player.Position.Y - flagY;
+        playerDistanceSquared = playerDeltaX * playerDeltaX + playerDeltaY * playerDeltaY;
+
+        var foundPositionedAetheryte = false;
+        foreach (var entry in aetheryteList)
+        {
+            if (entry.TerritoryId != territoryId)
+                continue;
+
+            var aetheryte = entry.AetheryteData.Value;
+            if (!aetheryte.IsAetheryte || aetheryte.Map.RowId != mapId ||
+                !TryGetAetheryteWorldPosition(aetheryte, mapId, out var aetheryteX, out var aetheryteY))
+            {
+                continue;
+            }
+
+            var deltaX = aetheryteX - flagX;
+            var deltaY = aetheryteY - flagY;
+            var distanceSquared = deltaX * deltaX + deltaY * deltaY;
+            if (distanceSquared < nearestAetheryteDistanceSquared)
+            {
+                nearestAetheryteDistanceSquared = distanceSquared;
+                foundPositionedAetheryte = true;
+            }
+        }
+
+        return foundPositionedAetheryte &&
+               playerDistanceSquared < nearestAetheryteDistanceSquared;
     }
 
     private void AnnounceFlag(uint territoryId, uint mapId, float flagX, float flagY, bool isTest)
