@@ -289,6 +289,9 @@ public sealed class Plugin : IDalamudPlugin
     private float wheelTeleportStallSampleY;
     private float wheelTeleportStallSampleZ;
     private DateTime wheelTeleportStallRecoveryAt;
+    private string wheelWatchdogState = string.Empty;
+    private DateTime wheelWatchdogStateSince;
+    private DateTime wheelWatchdogCooldownUntil;
     private bool wheelNewFlagPending;
     private bool wheelFlagSnapshotValid;
     private DateTime wheelFlagRefreshRequestedAt;
@@ -299,7 +302,6 @@ public sealed class Plugin : IDalamudPlugin
     private int wheelFlagRound;
     private int wheelLastProcessedRound = -1;
     private bool wheelWaitingForFreshFlag;
-    private bool wheelPreviousFlagCompleted;
     private bool rouletteModeActive;
     private bool rouletteWasInCombat;
     private ulong rouletteTargetEntityId;
@@ -3036,6 +3038,114 @@ public sealed class Plugin : IDalamudPlugin
         return true;
     }
 
+    private bool TryHandleWheelWorkflowWatchdog()
+    {
+        var state = GetWheelWorkflowWatchdogState(out var timeout);
+        if (string.IsNullOrEmpty(state))
+        {
+            wheelWatchdogState = string.Empty;
+            wheelWatchdogStateSince = default;
+            return false;
+        }
+
+        if (!string.Equals(state, wheelWatchdogState, StringComparison.Ordinal))
+        {
+            wheelWatchdogState = state;
+            wheelWatchdogStateSince = DateTime.UtcNow;
+            return false;
+        }
+
+        if (DateTime.UtcNow < wheelWatchdogCooldownUntil ||
+            DateTime.UtcNow - wheelWatchdogStateSince < timeout)
+            return false;
+
+        RecoverStuckWheelWorkflow(state);
+        wheelWatchdogState = string.Empty;
+        wheelWatchdogStateSince = default;
+        wheelWatchdogCooldownUntil = DateTime.UtcNow.AddSeconds(5);
+        return true;
+    }
+
+    private string GetWheelWorkflowWatchdogState(out TimeSpan timeout)
+    {
+        timeout = TimeSpan.FromSeconds(45);
+        if (!IsWheelLogicSelected || emergencyStopActive || condition[ConditionFlag.InCombat])
+            return string.Empty;
+
+        if (wheelPendingMapLink != null)
+        {
+            timeout = TimeSpan.FromSeconds(20);
+            return "wheel-map-link";
+        }
+
+        if (wheelAwaitingMapChangeAndFlag)
+        {
+            timeout = wheelTeleportAcceptSubmitted
+                ? TimeSpan.FromSeconds(60)
+                : TimeSpan.FromSeconds(30);
+            return $"wheel-teleport-flag:{wheelTeleportAcceptSubmitted}:{wheelNewFlagPending}:{wheelWaitingForFreshFlag}:{clientState.MapId}";
+        }
+
+        if (mountAfterTeleportPending)
+        {
+            timeout = TimeSpan.FromSeconds(45);
+            return $"wheel-mount:{wheelFlagRound}:{condition[ConditionFlag.Mounted]}:{mountRetryQueued}";
+        }
+
+        if (dismountAtFlagPending)
+        {
+            timeout = TimeSpan.FromSeconds(90);
+            return $"wheel-dismount:{navigationMovementObserved}:{condition[ConditionFlag.Mounted]}";
+        }
+
+        return string.Empty;
+    }
+
+    private void RecoverStuckWheelWorkflow(string state)
+    {
+        commandManager.ProcessCommand("/vnav stop");
+
+        if (state == "wheel-map-link")
+        {
+            wheelPendingMapLinkDeadline = DateTime.UtcNow.AddSeconds(20);
+            AutoTreasureHuntStatus = "车轮防卡：地图链接处理超时，重新尝试设置红旗。";
+            _ = framework.RunOnTick(TryProcessWheelMapLink, delay: TimeSpan.FromMilliseconds(250));
+            return;
+        }
+
+        if (state.StartsWith("wheel-teleport-flag:", StringComparison.Ordinal))
+        {
+            wheelFlagReadyAt = default;
+            wheelFlagRefreshRequestedAt = DateTime.UtcNow;
+            wheelWaitingForFreshFlag = true;
+            wheelNewFlagPending = true;
+            if (!wheelTeleportAcceptSubmitted)
+                wheelTeleportAcceptAt = default;
+            AutoTreasureHuntStatus = "车轮防卡：传送或红旗刷新超时，重新检查传送状态和红旗。";
+            return;
+        }
+
+        if (state.StartsWith("wheel-mount:", StringComparison.Ordinal))
+        {
+            mountAfterTeleportPending = true;
+            mountRetryQueued = false;
+            mountAttemptCount = 0;
+            navigationPositionSampleValid = false;
+            navigationMovementObserved = false;
+            AutoTreasureHuntStatus = "车轮防卡：坐骑流程超时，重新执行随机坐骑和红旗寻路。";
+            UseMountRouletteAfterTeleportOnFrameworkThread();
+            return;
+        }
+
+        if (state.StartsWith("wheel-dismount:", StringComparison.Ordinal))
+        {
+            navigationPositionSampleValid = false;
+            navigationMovementObserved = false;
+            AutoTreasureHuntStatus = "车轮防卡：红旗寻路或下坐骑流程超时，重新执行红旗寻路。";
+            commandManager.ProcessCommand("/vnav flyflag");
+        }
+    }
+
     private bool TryHandleMovementWatchdog()
     {
         var state = GetMovementWatchdogState();
@@ -3540,6 +3650,27 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+    /// <summary>
+    /// 独立的车轮野外流程入口。车轮的传送、红旗、watchdog 和寻路调度
+    /// 在这里集中处理，底层坐骑和下坐骑动作仍复用现有实现。
+    /// </summary>
+    private void TryHandleWheelOutdoorNavigation()
+    {
+        if (!IsWheelLogicSelected || emergencyStopActive)
+            return;
+
+        TryHandleWheelCombatState();
+        TryProcessWheelMapLink();
+        TryHandleWheelLogic();
+        TryHandleWheelPostTeleport();
+
+        if (TryHandleMovementWatchdog())
+            return;
+
+        TryHandleWheelDoorSelection();
+        TryDismountAtFlag();
+    }
+
     private unsafe void OnFrameworkUpdate(IFramework framework)
     {
         openMarketAnywhere.Update();
@@ -3562,23 +3693,36 @@ public sealed class Plugin : IDalamudPlugin
 
         if (IsWheelLogicSelected)
         {
+            TryHandleWheelOutdoorNavigation();
+            return;
+        }
+
+        if (false)
+        {
+            /*
             TryHandleWheelCombatState();
+
+            // 传送接受后的地图/红旗状态推进必须优先于 watchdog。watchdog 可能
+            // 因上一阶段残留的移动状态返回 true，从而阻止这里启动坐骑和 vnav。
+            TryProcessWheelMapLink();
+            TryHandleWheelLogic();
+            TryHandleWheelPostTeleport();
+
             if (TryHandleMovementWatchdog())
             {
                 return;
             }
 
-            if (TryHandleWorkflowWatchdog())
+            if (TryHandleWheelWorkflowWatchdog())
             {
                 return;
             }
 
-            TryProcessWheelMapLink();
-            TryHandleWheelLogic();
             TryHandleWheelDoorSelection();
-            TryHandleWheelPostTeleport();
             TryDismountAtFlag();
             return;
+        }
+        */
         }
 
         if (!IsHeadLogicSelected)
@@ -3670,6 +3814,14 @@ public sealed class Plugin : IDalamudPlugin
 
     private void TryHandleManualTestUpdate()
     {
+        // 手动测试同样优先推进车轮传送状态，避免通用 watchdog 抢先返回。
+        if (IsWheelLogicSelected)
+        {
+            TryProcessWheelMapLink();
+            TryHandleWheelLogic();
+            TryHandleWheelPostTeleport();
+        }
+
         if (TryHandleMovementWatchdog() || TryHandleWorkflowWatchdog())
         {
             return;
@@ -3677,8 +3829,6 @@ public sealed class Plugin : IDalamudPlugin
 
         if (IsWheelLogicSelected)
         {
-            TryProcessWheelMapLink();
-            TryHandleWheelPostTeleport();
             TryDismountAtFlag();
             return;
         }
@@ -3761,6 +3911,13 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         wheelLastMapLink = CloneMapLink(mapLink);
+        // 每个聊天地图链接都开始新的车轮红旗轮次，清除地图 12
+        // 或上一轮流程遗留的完成状态。
+        wheelLastProcessedRound = -1;
+        wheelFlagSnapshotValid = false;
+        wheelFlagReadyAt = default;
+        wheelTeleportAcceptSubmitted = false;
+        wheelTeleportAcceptedPrompt = string.Empty;
         if (!CanRunAutomationOrTest)
         {
             WheelMapLinkStatus = $"已缓存聊天地图链接：{mapLink.PlaceName} {mapLink.CoordinateString}，可点击测试按钮读取。";
@@ -3943,7 +4100,7 @@ public sealed class Plugin : IDalamudPlugin
 
         if (wheelTeleportAcceptAt == default)
         {
-            wheelTeleportAcceptAt = DateTime.UtcNow.AddSeconds(1);
+            wheelTeleportAcceptAt = DateTime.UtcNow;
             AutoTreasureHuntStatus = "车轮：检测到传送请求，等待一秒后接受。";
             return;
         }
@@ -4087,7 +4244,6 @@ public sealed class Plugin : IDalamudPlugin
         wheelPendingMapLinkDeadline = default;
         wheelNewFlagPending = false;
         wheelWaitingForFreshFlag = false;
-        wheelPreviousFlagCompleted = false;
         wheelFlagSnapshotValid = false;
         wheelFlagRefreshRequestedAt = default;
         wheelAwaitingMapChangeAndFlag = false;
@@ -4109,7 +4265,6 @@ public sealed class Plugin : IDalamudPlugin
         wheelFlagRound = 0;
         wheelLastProcessedRound = -1;
         wheelWaitingForFreshFlag = true;
-        wheelPreviousFlagCompleted = false;
         wheelFlagSnapshotValid = false;
         wheelFlagRefreshRequestedAt = DateTime.UtcNow;
     }
@@ -4119,7 +4274,6 @@ public sealed class Plugin : IDalamudPlugin
         if (!wheelAwaitingMapChangeAndFlag ||
             !wheelNewFlagPending ||
             !wheelWaitingForFreshFlag ||
-            wheelPreviousFlagCompleted && wheelLastProcessedRound == wheelFlagRound ||
             wheelLastMapLink == null ||
             emergencyStopActive)
         {
@@ -4132,6 +4286,9 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        // OpenMapWithMapLink opens the native map UI and it captures movement
+        // input until closed. Close it before processing the new flag.
+        CloseWheelMapWindows();
         var currentMapId = clientState.MapId;
         if (currentMapId == 0)
         {
@@ -4140,18 +4297,15 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         // 同地图红旗无需等待传送确认；跨地图仍必须先接受传送。
-        var telepo = Telepo.Instance();
-        var hasActiveTeleportRequest = telepo != null && telepo->ActiveTeleportRequest;
         var flagBelongsToCurrentMap = currentMapId == wheelLastMapLink.Map.RowId &&
             clientState.TerritoryType == wheelLastMapLink.TerritoryType.RowId;
-        if (!wheelTeleportAcceptSubmitted &&
-            (!flagBelongsToCurrentMap || hasActiveTeleportRequest))
+        if (!flagBelongsToCurrentMap)
         {
             AutoTreasureHuntStatus = "车轮：已获取新红旗，等待接受传送邀请后再进行寻路。";
             return;
         }
 
-        if (!wheelTeleportAcceptSubmitted && flagBelongsToCurrentMap)
+        if (flagBelongsToCurrentMap)
         {
             wheelTeleportAcceptSubmitted = true;
             wheelTeleportSourceMapId = currentMapId;
@@ -4185,7 +4339,7 @@ public sealed class Plugin : IDalamudPlugin
 
         // 红旗已经匹配当前地图但旧快照未被游戏清除时，最多等待 3 秒后放行，
         // 避免车轮停在“已设置红旗”状态而不进入坐骑和寻路。
-        if (wheelFlagSnapshotValid &&
+        if (false && wheelFlagSnapshotValid &&
             wheelFlagRefreshRequestedAt != default &&
             DateTime.UtcNow - wheelFlagRefreshRequestedAt >= TimeSpan.FromSeconds(3))
         {
@@ -4194,7 +4348,7 @@ public sealed class Plugin : IDalamudPlugin
             AutoTreasureHuntStatus = "车轮：红旗已匹配当前地图，结束刷新等待并继续前往红旗。";
         }
 
-        if (wheelFlagSnapshotValid &&
+        if (false && wheelFlagSnapshotValid &&
             wheelFlagRefreshRequestedAt != default &&
             DateTime.UtcNow - wheelFlagRefreshRequestedAt >= TimeSpan.FromSeconds(5) &&
             wheelFlagSnapshotTerritoryId == flagMarker.TerritoryId &&
@@ -4205,7 +4359,7 @@ public sealed class Plugin : IDalamudPlugin
             wheelFlagSnapshotValid = false;
         }
 
-        if (wheelFlagSnapshotValid &&
+        if (false && wheelFlagSnapshotValid &&
             wheelFlagSnapshotTerritoryId == flagMarker.TerritoryId &&
             wheelFlagSnapshotMapId == flagMarker.MapId &&
             MathF.Abs(wheelFlagSnapshotX - flagMarker.XFloat) <= 0.01f &&
@@ -4221,7 +4375,6 @@ public sealed class Plugin : IDalamudPlugin
             wheelFlagRound++;
             wheelLastProcessedRound = wheelFlagRound;
             wheelWaitingForFreshFlag = false;
-            wheelPreviousFlagCompleted = true;
             wheelAwaitingMapChangeAndFlag = false;
             wheelTeleportAcceptSubmitted = false;
             wheelTeleportSourceMapId = 0;
@@ -4238,7 +4391,6 @@ public sealed class Plugin : IDalamudPlugin
         wheelFlagRound++;
         wheelLastProcessedRound = wheelFlagRound;
         wheelWaitingForFreshFlag = false;
-        wheelPreviousFlagCompleted = true;
         wheelTeleportAcceptSubmitted = false;
         wheelTeleportSourceMapId = 0;
         mountAfterTeleportPending = true;
@@ -4249,6 +4401,16 @@ public sealed class Plugin : IDalamudPlugin
         navigationMovementObserved = false;
         AutoTreasureHuntStatus = $"车轮：已获取地图 {currentMapId} 的红旗坐标，准备使用随机坐骑前往。";
         UseMountRouletteAfterTeleportOnFrameworkThread();
+    }
+
+    private unsafe void CloseWheelMapWindows()
+    {
+        foreach (var addonName in new[] { "WorldMap", "WorldMapDetail", "_WorldMap", "Map" })
+        {
+            var addon = gameGui.GetAddonByName<AtkUnitBase>(addonName);
+            if (addon != null && addon->IsReady && addon->IsVisible)
+                addon->Close(true);
+        }
     }
 
     private void TryRecoverWheelTeleportStall(uint currentMapId, float flagX, float flagY)
@@ -4767,12 +4929,6 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        TryConfirmDoorSelectionChest();
-        if (confirmDoorSelectionChestPending)
-        {
-            return;
-        }
-
         var combatChestIds = doorSelectionFloor switch
         {
             1 => TreasureMapDefinitions.DoorSelectionCombatStartChestFloor1BaseIds,
@@ -4784,25 +4940,36 @@ public sealed class Plugin : IDalamudPlugin
         };
         var chest = doorSelectionPostCombatChestPending
             ? objectTable.FirstOrDefault(gameObject =>
-                gameObject.BaseId == 0 && IsTreasureChest(gameObject))
+                IsTreasureChest(gameObject) &&
+                gameObject.IsTargetable)
             : objectTable.FirstOrDefault(gameObject =>
                 combatChestIds.Contains(gameObject.BaseId));
         if (chest == null)
         {
-            if (doorSelectionPostCombatChestPending)
+            if (doorSelectionPostCombatChestPending &&
+                !condition[ConditionFlag.InCombat] &&
+                doorSelectionCombatStartedThisFloor)
             {
-                // 战斗结束宝箱无 BaseID，交互完成后可能立即从对象表移除。
-                // 找不到该类宝箱即表示本层战斗宝箱阶段已结束，直接进入选门。
+                commandManager.ProcessCommand("/vnav stop");
+                ResetDoorSelectionChestTarget();
                 doorSelectionPostCombatChestPending = false;
                 doorSelectionInitialChestCompleted = true;
                 doorSelectionPostCombatChestHandled = true;
                 doorSelectionCombatStartedThisFloor = false;
                 doorSelectionInitialChestYesConfirmed = false;
                 doorSelectionCombatObservedAfterYes = false;
+                AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层场上没有可选中宝箱，开始选择下一扇门。";
+                TryHandleDoorSelectionDoor();
+                return;
+            }
+
+            if (doorSelectionPostCombatChestPending)
+            {
+                // 战斗结束宝箱无 BaseID，交互完成后可能立即从对象表移除。
+                // 找不到该类宝箱即表示本层战斗宝箱阶段已结束，直接进入选门。
                 commandManager.ProcessCommand("/vnav stop");
                 ResetDoorSelectionChestTarget();
-                AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层战斗宝箱已处理，正在检查下一扇门。";
-                TryHandleDoorSelectionDoor();
+                AutoTreasureHuntStatus = "选门：已切换为战斗后宝箱阶段，等待无 BaseID 的宝箱出现。";
                 return;
             }
 
@@ -4856,27 +5023,6 @@ public sealed class Plugin : IDalamudPlugin
             AutoTreasureHuntStatus = doorSelectionPostCombatChestPending
                 ? $"选门：战斗结束后正在再次前往宝箱（Entity ID {chest.EntityId}，BaseID {chest.BaseId}）。"
                 : $"选门：正在前往初始宝箱（Entity ID {chest.EntityId}，BaseID {chest.BaseId}）。";
-            return;
-        }
-
-        if (!chest.IsTargetable)
-        {
-            commandManager.ProcessCommand("/vnav stop");
-            doorSelectionChestPositionSampleValid = false;
-            if (doorSelectionPostCombatChestPending)
-            {
-                doorSelectionPostCombatChestPending = false;
-                doorSelectionInitialChestCompleted = true;
-                doorSelectionPostCombatChestHandled = true;
-                doorSelectionCombatStartedThisFloor = false;
-                doorSelectionInitialChestYesConfirmed = false;
-                doorSelectionCombatObservedAfterYes = false;
-                ResetDoorSelectionChestTarget();
-                AutoTreasureHuntStatus = "战斗结束宝箱已完成或不可选中，开始检查下一扇门。";
-                TryHandleDoorSelectionDoor();
-                return;
-            }
-            AutoTreasureHuntStatus = $"选门：已到达宝箱位置（Entity ID {chest.EntityId}），等待宝箱变为可选中。";
             return;
         }
 
@@ -4935,8 +5081,12 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        confirmDoorSelectionChestPending = true;
-        doorSelectionChestConfirmDeadline = DateTime.UtcNow.AddSeconds(10);
+        confirmDoorSelectionChestPending = false;
+        doorSelectionInitialChestYesConfirmed = true;
+        doorSelectionInitialChestCompleted = false;
+        doorSelectionPostCombatChestPending = false;
+        doorSelectionPostCombatChestHandled = false;
+        doorSelectionCombatObservedAfterYes = false;
             AutoTreasureHuntStatus = "选门：已与战斗宝箱交互，等待确认窗口。";
     }
 
@@ -5112,16 +5262,19 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        // The confirmation window itself is the phase boundary. From this
+        // point onward, only the post-combat chest without a BaseID is valid.
+        doorSelectionInitialChestYesConfirmed = true;
+        doorSelectionInitialChestCompleted = false;
+        doorSelectionPostCombatChestPending = true;
+        doorSelectionPostCombatChestHandled = false;
+        doorSelectionCombatObservedAfterYes = true;
+
         if (addon->FireCallbackInt(0))
         {
             confirmDoorSelectionChestPending = false;
-            doorSelectionInitialChestCompleted = true;
-            doorSelectionInitialChestYesConfirmed = true;
-            doorSelectionCombatObservedAfterYes = false;
-            doorSelectionPostCombatChestPending = false;
-            doorSelectionPostCombatChestHandled = false;
             commandManager.ProcessCommand("/vnav stop");
-            AutoTreasureHuntStatus = "选门：已在初始宝箱确认窗口选择“是”，本阶段完成。";
+            AutoTreasureHuntStatus = "选门：已出现并确认初始宝箱 Yes/No，等待战斗后无 BaseID 宝箱。";
             TeleportTestStatus = AutoTreasureHuntStatus;
         }
         else
