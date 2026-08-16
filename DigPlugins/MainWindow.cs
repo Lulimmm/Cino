@@ -536,6 +536,11 @@ public sealed class MainWindow
             plugin.TestExitRouletteInstance();
         }
         ImGui.SameLine();
+        if (ImGui.Button("测试查找退出点"))
+        {
+            plugin.TestFindRouletteExitPoint();
+        }
+        ImGui.SameLine();
         if (ImGui.Button("测试补图逻辑"))
         {
             plugin.TestMapSupplementLogic();

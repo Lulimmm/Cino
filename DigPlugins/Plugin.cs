@@ -1566,6 +1566,33 @@ public sealed class Plugin : IDalamudPlugin
         _ = framework.RunOnFrameworkThread(TryHandleRouletteExitTest);
     }
 
+    public void TestFindRouletteExitPoint()
+    {
+        _ = framework.RunOnFrameworkThread(() =>
+        {
+            var exit = objectTable
+                .Where(gameObject =>
+                    gameObject.BaseId == RouletteExitBaseId &&
+                    gameObject.IsTargetable)
+                .OrderBy(gameObject => objectTable.LocalPlayer == null
+                    ? float.PositiveInfinity
+                    : System.Numerics.Vector3.DistanceSquared(
+                        objectTable.LocalPlayer.Position,
+                        gameObject.Position))
+                .FirstOrDefault();
+
+            if (exit == null)
+            {
+                TeleportTestStatus = $"测试退出点：当前未检测到可选中的退出点（BaseId {RouletteExitBaseId}）。";
+                return;
+            }
+
+            targetManager.Target = exit;
+            TeleportTestStatus = FormattableString.Invariant(
+                $"测试退出点：已检测到可选中退出点，BaseId {exit.BaseId}，EntityId {exit.EntityId}，XYZ ({exit.Position.X:F3}, {exit.Position.Y:F3}, {exit.Position.Z:F3})。已设为当前目标，未执行交互。");
+        });
+    }
+
     public void TestListInteractableObjects()
     {
         TestListObjects(targetable: true, "可选中物体");
@@ -5607,6 +5634,24 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         rouletteChestDisappearDeadline = default;
+
+        // Once the exit entity exists, enter the exit phase. Chests have already
+        // been handled above; a non-targetable exit must wait for targetability
+        // instead of falling back to the dream-entity waiting path.
+        var exitEntity = objectTable.FirstOrDefault(gameObject =>
+            gameObject.BaseId == RouletteExitBaseId);
+        if (exitEntity != null)
+        {
+            if (!exitEntity.IsTargetable)
+            {
+                ResetRouletteTarget();
+                AutoTreasureHuntStatus = "转盘：已检测到退出点，但当前不可选中，等待其变为可选中。";
+                return;
+            }
+
+            HandleRouletteTarget(exitEntity, "退出点", TimeSpan.FromSeconds(2), confirmExit: true);
+            return;
+        }
 
         var dream = objectTable.FirstOrDefault(gameObject =>
             TreasureMapDefinitions.RouletteDreamBaseIds.Contains(gameObject.BaseId) &&
