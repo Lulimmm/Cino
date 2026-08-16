@@ -4144,7 +4144,9 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (TryUseWheelDirectFlagNavigation(out var playerDistanceSquared, out var aetheryteDistanceSquared))
+        if (wheelNewFlagPending &&
+            wheelWaitingForFreshFlag &&
+            TryUseWheelDirectFlagNavigation(out var playerDistanceSquared, out var aetheryteDistanceSquared))
         {
             // 当前地图内步行/飞行比从最近可用水晶重新传送更近：关闭传送邀请，
             // 直接由后续红旗流程执行坐骑和 /vnav flyflag。
@@ -4169,12 +4171,17 @@ public sealed class Plugin : IDalamudPlugin
 
         if (addon->FireCallbackInt(0))
         {
+            var hasPendingFlagNavigation = wheelNewFlagPending &&
+                wheelActiveMapLinkGeneration != 0 &&
+                wheelActiveMapLinkGeneration == wheelMapLinkGeneration;
             wheelTeleportAcceptSubmitted = true;
             wheelTeleportAcceptedPrompt = prompt;
-            wheelAwaitingMapChangeAndFlag = true;
-            wheelWaitingForFreshFlag = true;
+            wheelAwaitingMapChangeAndFlag = hasPendingFlagNavigation;
+            wheelWaitingForFreshFlag = hasPendingFlagNavigation;
             wheelTeleportSourceMapId = clientState.MapId;
-            wheelFlagReadyAt = DateTime.UtcNow.AddSeconds(1);
+            wheelFlagReadyAt = hasPendingFlagNavigation
+                ? DateTime.UtcNow.AddSeconds(1)
+                : default;
             AutoTreasureHuntStatus = "车轮：已接受传送请求。";
         }
         else
@@ -4506,6 +4513,7 @@ public sealed class Plugin : IDalamudPlugin
         {
             wheelFlagRound++;
             wheelLastProcessedRound = wheelFlagRound;
+            wheelNewFlagPending = false;
             wheelWaitingForFreshFlag = false;
             wheelAwaitingMapChangeAndFlag = false;
             wheelTeleportAcceptSubmitted = false;
@@ -4522,6 +4530,7 @@ public sealed class Plugin : IDalamudPlugin
         wheelAwaitingMapChangeAndFlag = false;
         wheelFlagRound++;
         wheelLastProcessedRound = wheelFlagRound;
+        wheelNewFlagPending = false;
         wheelWaitingForFreshFlag = false;
         wheelTeleportAcceptSubmitted = false;
         wheelTeleportSourceMapId = 0;

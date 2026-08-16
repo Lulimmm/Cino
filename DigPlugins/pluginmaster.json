@@ -3,7 +3,7 @@
     "Author": "Cino",
     "Name": "海豹助手",
     "InternalName": "AutoTreasureHunt",
-    "AssemblyVersion": "1.0.5.7",
+    "AssemblyVersion": "1.0.5.8",
     "TestingAssemblyVersion": null,
     "Description": "自动处理藏宝图、补图、传送和寻路流程。",
     "Punchline": "处理一些琐事",
@@ -17,9 +17,9 @@
     "IsTestingExclusive": false,
     "RepoUrl": "https://github.com/Lulimmm/Cino",
     "IconUrl": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/DigPlugins/icon-v1.png",
-    "DownloadLinkInstall": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/DigPlugins/AutoTreasureHunt-1.0.5.7.zip",
-    "DownloadLinkTesting": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/DigPlugins/AutoTreasureHunt-1.0.5.7.zip",
-    "DownloadLinkUpdate": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/DigPlugins/AutoTreasureHunt-1.0.5.7.zip",
-    "LastUpdate": "1786852673"
+    "DownloadLinkInstall": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/DigPlugins/AutoTreasureHunt-1.0.5.8.zip",
+    "DownloadLinkTesting": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/DigPlugins/AutoTreasureHunt-1.0.5.8.zip",
+    "DownloadLinkUpdate": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/DigPlugins/AutoTreasureHunt-1.0.5.8.zip",
+    "LastUpdate": "1786854726"
   }
 ]
