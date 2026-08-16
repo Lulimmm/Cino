@@ -280,6 +280,11 @@ public sealed class Plugin : IDalamudPlugin
     private bool wheelWasInCombat;
     private MapLinkPayload? wheelPendingMapLink;
     private MapLinkPayload? wheelLastMapLink;
+    // The arrival order, rather than coordinates, identifies a new map link.
+    // Two consecutive maps can legitimately point at the same location.
+    private int wheelMapLinkGeneration;
+    private int wheelPendingMapLinkGeneration;
+    private int wheelActiveMapLinkGeneration;
     private DateTime wheelPendingMapLinkDeadline;
     private bool wheelAwaitingMapChangeAndFlag;
     private uint wheelTeleportSourceMapId;
@@ -841,8 +846,9 @@ public sealed class Plugin : IDalamudPlugin
         wheelDoorSelectionLastMapId = 0;
         wheelDoorSelectionChestEntityId = 0;
         wheelDoorSelectionChestMoveIssued = false;
-        ResetWheelTeleportAcceptance();
+                ResetWheelTeleportAcceptance();
                 ResetWheelMapLinkPending();
+                ResetWheelMapLinkGenerations();
                 AutoTreasureHuntStatus = "车轮逻辑已开启，正在等待传送请求。";
             }
         }
@@ -879,6 +885,7 @@ public sealed class Plugin : IDalamudPlugin
             autoSaddlebagMoveRequested = false;
             ResetWheelTeleportAcceptance();
             ResetWheelMapLinkPending();
+            ResetWheelMapLinkGenerations();
             RefreshTreasureMapCounts();
             AutoTreasureHuntStatus = "自动挖宝已关闭。";
         }
@@ -1913,6 +1920,7 @@ public sealed class Plugin : IDalamudPlugin
         marketSubmittedListingIds.Clear();
         ResetWheelTeleportAcceptance();
         ResetWheelMapLinkPending();
+        ResetWheelMapLinkGenerations();
         wheelWasInCombat = false;
 
         treasureChestPending = false;
@@ -3910,6 +3918,13 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        // A new party flag cancels every pending action from the prior flag.
+        // This remains reliable even when two map links have identical coordinates.
+        wheelMapLinkGeneration = wheelMapLinkGeneration == int.MaxValue
+            ? 1
+            : wheelMapLinkGeneration + 1;
+        ResetWheelMapLinkPending();
+        commandManager.ProcessCommand("/vnav stop");
         wheelLastMapLink = CloneMapLink(mapLink);
         // 每个聊天地图链接都开始新的车轮红旗轮次，清除地图 12
         // 或上一轮流程遗留的完成状态。
@@ -3925,6 +3940,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         wheelPendingMapLink = CloneMapLink(mapLink);
+        wheelPendingMapLinkGeneration = wheelMapLinkGeneration;
         wheelPendingMapLinkDeadline = DateTime.UtcNow.AddSeconds(20);
         WheelMapLinkStatus = $"检测到聊天地图链接：{mapLink.PlaceName} {mapLink.CoordinateString}，准备设置红旗。";
         AutoTreasureHuntStatus = $"车轮：检测到聊天地图链接 {mapLink.PlaceName} {mapLink.CoordinateString}，正在获取红旗。";
@@ -3957,6 +3973,15 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        if (wheelPendingMapLinkGeneration == 0 ||
+            wheelPendingMapLinkGeneration != wheelMapLinkGeneration)
+        {
+            wheelPendingMapLink = null;
+            wheelPendingMapLinkDeadline = default;
+            wheelPendingMapLinkGeneration = 0;
+            return;
+        }
+
         if (condition[ConditionFlag.BetweenAreas] ||
             condition[ConditionFlag.BetweenAreas51])
         {
@@ -3981,15 +4006,24 @@ public sealed class Plugin : IDalamudPlugin
             WheelMapLinkStatus = "车轮：红旗地图链接等待超时，将继续等待下一条红旗。";
             wheelPendingMapLink = null;
             wheelPendingMapLinkDeadline = default;
+            wheelPendingMapLinkGeneration = 0;
             return;
         }
 
         var mapLink = wheelPendingMapLink;
+        var mapLinkGeneration = wheelPendingMapLinkGeneration;
         CaptureWheelFlagSnapshot();
         if (gameGui.OpenMapWithMapLink(mapLink))
         {
+            if (mapLinkGeneration != wheelMapLinkGeneration)
+            {
+                return;
+            }
+
             wheelPendingMapLink = null;
             wheelPendingMapLinkDeadline = default;
+            wheelPendingMapLinkGeneration = 0;
+            wheelActiveMapLinkGeneration = mapLinkGeneration;
             wheelAwaitingMapChangeAndFlag = true;
             wheelNewFlagPending = true;
             wheelWaitingForFreshFlag = true;
@@ -4168,7 +4202,10 @@ public sealed class Plugin : IDalamudPlugin
         playerDistanceSquared = float.PositiveInfinity;
         nearestAetheryteDistanceSquared = float.PositiveInfinity;
 
-        if (wheelLastMapLink == null || objectTable.LocalPlayer == null)
+        if (wheelLastMapLink == null ||
+            wheelActiveMapLinkGeneration == 0 ||
+            wheelActiveMapLinkGeneration != wheelMapLinkGeneration ||
+            objectTable.LocalPlayer == null)
             return false;
 
         var mapAgent = AgentMap.Instance();
@@ -4325,6 +4362,8 @@ public sealed class Plugin : IDalamudPlugin
     {
         wheelPendingMapLink = null;
         wheelPendingMapLinkDeadline = default;
+        wheelPendingMapLinkGeneration = 0;
+        wheelActiveMapLinkGeneration = 0;
         wheelNewFlagPending = false;
         wheelWaitingForFreshFlag = false;
         wheelFlagSnapshotValid = false;
@@ -4342,14 +4381,22 @@ public sealed class Plugin : IDalamudPlugin
         navigationMovementObserved = false;
     }
 
+    private void ResetWheelMapLinkGenerations()
+    {
+        wheelMapLinkGeneration = 0;
+        wheelPendingMapLinkGeneration = 0;
+        wheelActiveMapLinkGeneration = 0;
+        wheelLastMapLink = null;
+    }
+
     private void ResetWheelFlagRoundForMap12()
     {
         // 地图 12 是流程起点：只归零轮次状态，不清除已经提交的传送接受状态。
         wheelFlagRound = 0;
         wheelLastProcessedRound = -1;
-        wheelWaitingForFreshFlag = true;
-        wheelFlagSnapshotValid = false;
-        wheelFlagRefreshRequestedAt = DateTime.UtcNow;
+        ResetWheelTeleportAcceptance();
+        ResetWheelMapLinkPending();
+        ResetWheelMapLinkGenerations();
     }
 
     private unsafe void TryHandleWheelPostTeleport()
@@ -4358,6 +4405,8 @@ public sealed class Plugin : IDalamudPlugin
             !wheelNewFlagPending ||
             !wheelWaitingForFreshFlag ||
             wheelLastMapLink == null ||
+            wheelActiveMapLinkGeneration == 0 ||
+            wheelActiveMapLinkGeneration != wheelMapLinkGeneration ||
             emergencyStopActive)
         {
             return;
@@ -5554,14 +5603,14 @@ public sealed class Plugin : IDalamudPlugin
             TreasureMapDefinitions.RouletteDreamBaseIds.Contains(gameObject.BaseId) &&
             gameObject.IsTargetable &&
             !rouletteInteractedEntities.Contains(gameObject.EntityId));
-        if (false && dream != null)
+        if (dream != null)
         {
             HandleRouletteTarget(dream, "潜网巡梦", TimeSpan.FromSeconds(1), confirmExit: false);
             return;
         }
 
         // 已交互过的潜网巡梦仍可能继续留在对象表中；只要它还在场，就禁止退出。
-        if (false && objectTable.Any(gameObject => TreasureMapDefinitions.RouletteDreamBaseIds.Contains(gameObject.BaseId)))
+        if (objectTable.Any(gameObject => TreasureMapDefinitions.RouletteDreamBaseIds.Contains(gameObject.BaseId)))
         {
             if (rouletteTargetKind == "退出点")
             {
