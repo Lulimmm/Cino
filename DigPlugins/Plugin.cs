@@ -5635,20 +5635,13 @@ public sealed class Plugin : IDalamudPlugin
 
         rouletteChestDisappearDeadline = default;
 
-        // Once the exit entity exists, enter the exit phase. Chests have already
-        // been handled above; a non-targetable exit must wait for targetability
-        // instead of falling back to the dream-entity waiting path.
+        // Only an interactable exit point takes precedence over the dream path.
+        // A present but non-targetable exit must not block dream interaction.
         var exitEntity = objectTable.FirstOrDefault(gameObject =>
-            gameObject.BaseId == RouletteExitBaseId);
+            gameObject.BaseId == RouletteExitBaseId &&
+            gameObject.IsTargetable);
         if (exitEntity != null)
         {
-            if (!exitEntity.IsTargetable)
-            {
-                ResetRouletteTarget();
-                AutoTreasureHuntStatus = "转盘：已检测到退出点，但当前不可选中，等待其变为可选中。";
-                return;
-            }
-
             HandleRouletteTarget(exitEntity, "退出点", TimeSpan.FromSeconds(2), confirmExit: true);
             return;
         }
