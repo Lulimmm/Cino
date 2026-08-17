@@ -3694,6 +3694,20 @@ public sealed class Plugin : IDalamudPlugin
         if (!IsWheelLogicSelected || emergencyStopActive)
             return;
 
+        // 车轮进入转盘副本地图时改由退出点流程接管，不继续运行野外红旗/坐骑寻路。
+        // 车轮不处理宝箱或潜网巡梦，避免干预车头的副本交互。
+        if (IsRouletteMap)
+        {
+            TryHandleWheelRouletteExit();
+            return;
+        }
+
+        // 离开转盘副本后释放转盘目标、交互和 AEAssist 状态，再回到车轮野外流程。
+        if (rouletteModeActive)
+        {
+            ExitRouletteMode();
+        }
+
         TryHandleWheelCombatState();
         TryProcessWheelMapLink();
         TryHandleWheelLogic();
@@ -5680,6 +5694,44 @@ public sealed class Plugin : IDalamudPlugin
 
         ResetRouletteTarget();
         AutoTreasureHuntStatus = "转盘：等待潜网巡梦、宝箱或退出点出现。";
+    }
+
+    /// <summary>
+    /// 车轮在转盘副本内仅执行退出流程：不交互宝箱或潜网巡梦。
+    /// 可选中宝箱尚存在时不会退出，避免车头尚未完成结算时提前离开。
+    /// </summary>
+    private void TryHandleWheelRouletteExit()
+    {
+        if (condition[ConditionFlag.InCombat])
+        {
+            return;
+        }
+
+        TryConfirmRouletteExit();
+        if (confirmRouletteExitPending)
+        {
+            return;
+        }
+
+        if (objectTable.Any(gameObject => IsTreasureChest(gameObject) && gameObject.IsTargetable))
+        {
+            ResetRouletteTarget();
+            AutoTreasureHuntStatus = "车轮转盘：场上仍有可选中宝箱，仅等待车头处理，不执行退出。";
+            return;
+        }
+
+        var exit = objectTable.FirstOrDefault(gameObject =>
+            gameObject.BaseId == RouletteExitBaseId &&
+            gameObject.IsTargetable &&
+            !rouletteInteractedEntities.Contains(gameObject.EntityId));
+        if (exit == null)
+        {
+            ResetRouletteTarget();
+            AutoTreasureHuntStatus = "车轮转盘：等待可选中的退出点。";
+            return;
+        }
+
+        HandleRouletteTarget(exit, "退出点", TimeSpan.FromSeconds(2), confirmExit: true);
     }
 
     private void TryHandleRouletteExitTest()
