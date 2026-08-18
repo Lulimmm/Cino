@@ -18,6 +18,23 @@ namespace AutoTreasureHunt;
 /// </summary>
 public sealed unsafe class OpenMarketAnywhere : IDisposable
 {
+    private static TimeSpan RandomizedDelay(TimeSpan baseDelay)
+    {
+        if (baseDelay <= TimeSpan.Zero)
+            return TimeSpan.Zero;
+
+        var jitterMilliseconds = Math.Min(500d, Math.Max(25d, baseDelay.TotalMilliseconds * 0.25d));
+        var milliseconds = baseDelay.TotalMilliseconds +
+            (Random.Shared.NextDouble() * 2d - 1d) * jitterMilliseconds;
+        return TimeSpan.FromMilliseconds(Math.Max(25d, milliseconds));
+    }
+
+    private static TimeSpan RandomizedDelay(double seconds) =>
+        RandomizedDelay(TimeSpan.FromSeconds(seconds));
+
+    private static TimeSpan RandomizedDelayMilliseconds(double milliseconds) =>
+        RandomizedDelay(TimeSpan.FromMilliseconds(milliseconds));
+
     private readonly IFramework framework;
     private readonly IGameGui gameGui;
     private readonly IPluginLog log;
@@ -806,7 +823,7 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
             agent->Show();
             requestAttempts = 0;
             Status = $"已打开 ItemSearch，等待请求物品 {ItemId} 的服务器报价。";
-            _ = framework.RunOnTick(RequestWhenReady, delay: TimeSpan.FromMilliseconds(250));
+            _ = framework.RunOnTick(RequestWhenReady, delay: RandomizedDelayMilliseconds(250));
         }
         catch (Exception ex)
         {
@@ -1334,7 +1351,7 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
                 if (DateTime.UtcNow < listingCaptureRetryDeadline && !purchaseRequestObserved)
                     QueueListingCaptureRetryIfNeeded();
             },
-            delay: TimeSpan.FromMilliseconds(100));
+            delay: RandomizedDelayMilliseconds(100));
     }
 
     private static unsafe uint GetActiveSearchItemId(InfoProxyItemSearch* info)
@@ -1416,7 +1433,7 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
             // Close/Hide again from a delayed tick; the addon may already be
             // in teardown and a second close can dereference stale native
             // callback state.
-            _ = framework.RunOnTick(MarkMarketResultClosed, delay: TimeSpan.FromMilliseconds(10));
+            _ = framework.RunOnTick(MarkMarketResultClosed, delay: RandomizedDelayMilliseconds(10));
         }
 
         var isTrackedConfirmation = pendingConfirmationAddon == nint.Zero ||
@@ -1581,7 +1598,7 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
         {
             if (++requestAttempts < 20)
             {
-                _ = framework.RunOnTick(RequestWhenReady, delay: TimeSpan.FromMilliseconds(250));
+                _ = framework.RunOnTick(RequestWhenReady, delay: RandomizedDelayMilliseconds(250));
                 return;
             }
             Status = "ItemSearch Addon 超时未就绪，未发送报价请求。";

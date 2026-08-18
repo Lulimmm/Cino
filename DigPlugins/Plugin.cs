@@ -84,6 +84,25 @@ public sealed class Plugin : IDalamudPlugin
     private const string LicenseValidationEndpoint = "https://1466827323-7rwdj63720.ap-shanghai.tencentscf.com/v1/validate";
     private const string LicenseHealthEndpoint = "https://1466827323-7rwdj63720.ap-shanghai.tencentscf.com/health";
     private static readonly HttpClient LicenseHttpClient = new() { Timeout = TimeSpan.FromSeconds(10) };
+
+    // Action scheduling uses bounded jitter to avoid identical retry cadence while
+    // keeping short framework waits responsive. Timeout thresholds remain fixed.
+    private static TimeSpan RandomizedDelay(TimeSpan baseDelay)
+    {
+        if (baseDelay <= TimeSpan.Zero)
+            return TimeSpan.Zero;
+
+        var jitterMilliseconds = Math.Min(500d, Math.Max(25d, baseDelay.TotalMilliseconds * 0.25d));
+        var milliseconds = baseDelay.TotalMilliseconds +
+            (Random.Shared.NextDouble() * 2d - 1d) * jitterMilliseconds;
+        return TimeSpan.FromMilliseconds(Math.Max(25d, milliseconds));
+    }
+
+    private static TimeSpan RandomizedDelay(double seconds) =>
+        RandomizedDelay(TimeSpan.FromSeconds(seconds));
+
+    private static TimeSpan RandomizedDelayMilliseconds(double milliseconds) =>
+        RandomizedDelay(TimeSpan.FromMilliseconds(milliseconds));
     private static readonly GameInventoryType[] MainInventoryTypes =
     [
         GameInventoryType.Inventory1,
@@ -458,7 +477,7 @@ public sealed class Plugin : IDalamudPlugin
         });
         _ = this.framework.RunOnTick(
             InitializeRuntimeState,
-            delay: TimeSpan.FromSeconds(1));
+            delay: RandomizedDelay(1));
     }
 
     private void InitializeRuntimeState()
@@ -1142,7 +1161,7 @@ public sealed class Plugin : IDalamudPlugin
             AutoTreasureHuntStatus = "当前仍处于藏宝图任务事件中，等待任务结算后再解读下一张地图或进入补图。";
             _ = framework.RunOnTick(
                 StartAutoTreasureHuntOnFrameworkThread,
-                delay: TimeSpan.FromSeconds(1));
+            delay: RandomizedDelay(1));
             return;
         }
 
@@ -1877,7 +1896,7 @@ public sealed class Plugin : IDalamudPlugin
             $"正在输出{interactableObjectEchoCategory}：{sent}/{interactableObjectEchoTotal}。";
         _ = framework.RunOnTick(
             () => SendNextInteractableObjectEcho(generation),
-            delay: TimeSpan.FromMilliseconds(250));
+            delay: RandomizedDelayMilliseconds(250));
     }
 
     private bool PrintEcho(string message)
@@ -2165,7 +2184,7 @@ public sealed class Plugin : IDalamudPlugin
                     marketPurchaseInitialMainCount = CountTreasureMaps(MainInventoryTypes, marketPurchaseItemId);
                     marketPurchaseAutomatic = automaticMapSupplementRunning;
                     marketPurchaseStage = MarketPurchaseStage.WaitingForSearchAddon;
-                    marketSearchRunAt = DateTime.UtcNow + MarketBoardOpenStabilizationDelay;
+                    marketSearchRunAt = DateTime.UtcNow + RandomizedDelay(MarketBoardOpenStabilizationDelay);
                     marketPurchaseDeadline = DateTime.UtcNow.AddSeconds(25);
                     TeleportTestStatus = $"已确认市场布告板窗口打开，等待搜索{marketPurchaseItemName}。";
                     return;
@@ -2323,7 +2342,7 @@ public sealed class Plugin : IDalamudPlugin
             {
                 _ = framework.RunOnTick(
                     StartAutoTreasureHuntOnFrameworkThread,
-                    delay: TimeSpan.FromSeconds(1));
+                    delay: RandomizedDelay(1));
             }
 
             return;
@@ -2381,7 +2400,7 @@ public sealed class Plugin : IDalamudPlugin
             addon->SearchText2.SetString(marketPurchaseItemName);
             addon->PartialMatch = false;
             marketPurchaseStage = MarketPurchaseStage.WaitingToRunSearch;
-            marketSearchRunAt = DateTime.UtcNow + MarketPurchaseActionDelay;
+            marketSearchRunAt = DateTime.UtcNow + RandomizedDelay(MarketPurchaseActionDelay);
             TeleportTestStatus = $"已将{marketPurchaseItemName}填入搜索框，等待游戏界面同步后执行搜索。";
             return;
         }
@@ -2401,7 +2420,7 @@ public sealed class Plugin : IDalamudPlugin
 
             addon->RunSearch(ignoreFilters: false);
             marketPurchaseStage = MarketPurchaseStage.WaitingForSearchResults;
-            marketSearchRunAt = DateTime.UtcNow + MarketPurchaseActionDelay;
+            marketSearchRunAt = DateTime.UtcNow + RandomizedDelay(MarketPurchaseActionDelay);
             marketPurchaseDeadline = DateTime.UtcNow.AddSeconds(15);
             TeleportTestStatus = $"已输入并搜索{marketPurchaseItemName}，等待精确搜索结果。";
             return;
@@ -2436,7 +2455,7 @@ public sealed class Plugin : IDalamudPlugin
                 addon->ResultsList->SelectItem(index, dispatchEvent: false);
                 addon->ResultsList->DispatchItemEvent(index, AtkEventType.ListItemClick);
                 marketPurchaseStage = MarketPurchaseStage.WaitingBeforePurchase;
-                marketSearchRunAt = DateTime.UtcNow + MarketPurchaseActionDelay;
+                marketSearchRunAt = DateTime.UtcNow + RandomizedDelay(MarketPurchaseActionDelay);
                 marketPricePageWaitSince = DateTime.UtcNow;
                 marketPricePageReadySince = default;
                 marketPurchaseDeadline = DateTime.UtcNow.AddSeconds(20);
@@ -2653,7 +2672,7 @@ public sealed class Plugin : IDalamudPlugin
         TeleportTestStatus = AutoTreasureHuntStatus;
         _ = framework.RunOnTick(
             StartAutoTreasureHuntOnFrameworkThread,
-            delay: TimeSpan.FromSeconds(1));
+            delay: RandomizedDelay(1));
     }
 
     private void TryStartAutomaticMapSupplement()
@@ -2994,7 +3013,7 @@ public sealed class Plugin : IDalamudPlugin
         {
             _ = framework.RunOnTick(
                 StartAutoTreasureHuntOnFrameworkThread,
-                delay: TimeSpan.FromSeconds(1));
+            delay: RandomizedDelay(1));
         }
     }
 
@@ -3144,7 +3163,7 @@ public sealed class Plugin : IDalamudPlugin
         {
             wheelPendingMapLinkDeadline = DateTime.UtcNow.AddSeconds(20);
             AutoTreasureHuntStatus = "车轮防卡：地图链接处理超时，重新尝试设置红旗。";
-            _ = framework.RunOnTick(TryProcessWheelMapLink, delay: TimeSpan.FromMilliseconds(250));
+            _ = framework.RunOnTick(TryProcessWheelMapLink, delay: RandomizedDelayMilliseconds(250));
             return;
         }
 
@@ -3593,7 +3612,7 @@ public sealed class Plugin : IDalamudPlugin
         {
             _ = framework.RunOnTick(
                 StartAutoTreasureHuntOnFrameworkThread,
-                delay: TimeSpan.FromSeconds(2));
+            delay: RandomizedDelay(2));
         }
     }
 
@@ -4071,7 +4090,9 @@ public sealed class Plugin : IDalamudPlugin
             wheelTeleportSourceMapId = clientState.MapId;
             wheelFlagReadyAt = DateTime.UtcNow.AddSeconds(1);
             wheelFlagRefreshRequestedAt = DateTime.UtcNow;
-            mountAfterTeleportPending = true;
+            // Capturing a flag is not proof that the teleport invitation was accepted.
+            // The post-teleport handler starts mounting only after the target map is confirmed.
+            mountAfterTeleportPending = false;
             mountRetryQueued = false;
             mountAttemptCount = 0;
             dismountAtFlagPending = false;
@@ -4191,14 +4212,21 @@ public sealed class Plugin : IDalamudPlugin
         {
             // 当前地图内步行/飞行比从最近可用水晶重新传送更近：关闭传送邀请，
             // 直接由后续红旗流程执行坐骑和 /vnav flyflag。
-            if (wheelLastMapLink != null)
+            if (wheelLastMapLink != null && addon->FireCallbackInt(1))
             {
-                wheelTeleportAcceptSubmitted = true;
-                wheelTeleportAcceptedPrompt = prompt;
-                wheelAwaitingMapChangeAndFlag = true;
-                wheelWaitingForFreshFlag = true;
-                wheelTeleportSourceMapId = clientState.MapId;
+                // Direct navigation deliberately declines the native invitation.  Merely
+                // changing our local flag leaves the modal open and blocks movement.
+                wheelTeleportAcceptSubmitted = false;
+                wheelTeleportAcceptedPrompt = string.Empty;
+                wheelAwaitingMapChangeAndFlag = false;
+                wheelWaitingForFreshFlag = false;
+                wheelNewFlagPending = false;
+                wheelTeleportSourceMapId = 0;
                 wheelFlagReadyAt = default;
+                mountAfterTeleportPending = true;
+                mountRetryQueued = false;
+                mountAttemptCount = 0;
+                ScheduleMountRouletteRetry();
                 AutoTreasureHuntStatus = $"车轮：当前距离红旗更近（角色 {MathF.Sqrt(playerDistanceSquared):F1}，最近水晶 {MathF.Sqrt(aetheryteDistanceSquared):F1}），不传送并直接前往红旗。";
             }
             else
@@ -4485,10 +4513,27 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (flagBelongsToCurrentMap)
+        if (flagBelongsToCurrentMap && !wheelTeleportAcceptSubmitted)
         {
-            wheelTeleportAcceptSubmitted = true;
-            wheelTeleportSourceMapId = currentMapId;
+            // A matching map alone does not mean the native invitation was accepted.
+            // When the head did not invite (or the wheel is already closer), direct
+            // navigation is valid; otherwise keep waiting for the invitation callback.
+            if (!TryUseWheelDirectFlagNavigation(out _, out _))
+            {
+                AutoTreasureHuntStatus = "车轮：已获取新红旗，等待传送邀请确认后再进行寻路。";
+                return;
+            }
+
+            wheelNewFlagPending = false;
+            wheelWaitingForFreshFlag = false;
+            wheelAwaitingMapChangeAndFlag = false;
+            wheelTeleportSourceMapId = 0;
+            mountAfterTeleportPending = true;
+            mountRetryQueued = false;
+            mountAttemptCount = 0;
+            AutoTreasureHuntStatus = "车轮：当前已在目标地图且距离红旗更近，直接开始前往。";
+            UseMountRouletteAfterTeleportOnFrameworkThread();
+            return;
         }
 
         if (wheelFlagReadyAt != default && DateTime.UtcNow < wheelFlagReadyAt)
@@ -4736,7 +4781,7 @@ public sealed class Plugin : IDalamudPlugin
             TeleportTestStatus = "已到达利姆萨·罗敏萨，两秒后前往市场布告板。";
             _ = framework.RunOnTick(
                 MoveToMarketBoardOnFrameworkThread,
-                delay: TimeSpan.FromSeconds(2));
+            delay: RandomizedDelay(2));
         }
 
         if (automaticMapSupplementRunning)
@@ -5515,7 +5560,7 @@ public sealed class Plugin : IDalamudPlugin
                     StartAutoTreasureHuntOnFrameworkThread();
                 }
             },
-            delay: TimeSpan.FromSeconds(2));
+            delay: RandomizedDelay(2));
     }
 
     private void ExitRouletteMode()
@@ -5551,7 +5596,7 @@ public sealed class Plugin : IDalamudPlugin
                         StartAutoTreasureHuntOnFrameworkThread();
                     }
                 },
-                delay: TimeSpan.FromSeconds(2));
+            delay: RandomizedDelay(2));
         }
     }
 
@@ -6130,7 +6175,7 @@ public sealed class Plugin : IDalamudPlugin
             AutoTreasureHuntStatus = "解读完成并检测到任务道具地图，一秒后开始传送流程。";
             _ = framework.RunOnTick(
                 StartAutoTreasureHuntOnFrameworkThread,
-                delay: TimeSpan.FromSeconds(1));
+            delay: RandomizedDelay(1));
         }
     }
 
@@ -6546,7 +6591,7 @@ public sealed class Plugin : IDalamudPlugin
                     headFlagTeleportReady = true;
                     TestTeleportToOpenedMapAetheryteOnFrameworkThread();
                 },
-                delay: TimeSpan.FromSeconds(1));
+            delay: RandomizedDelay(1));
             return;
         }
 
@@ -6943,7 +6988,7 @@ public sealed class Plugin : IDalamudPlugin
                         TestTeleportToOpenedMapAetheryteOnFrameworkThread();
                     }
                 },
-                delay: TimeSpan.FromSeconds(2));
+            delay: RandomizedDelay(2));
         }
 
         return true;
@@ -7014,7 +7059,7 @@ public sealed class Plugin : IDalamudPlugin
                     mountRetryQueued = false;
                     UseMountRouletteAfterTeleportOnFrameworkThread();
                 },
-                delay: TimeSpan.FromSeconds(3));
+            delay: RandomizedDelay(3));
             return;
         }
 
@@ -7058,7 +7103,7 @@ public sealed class Plugin : IDalamudPlugin
                 mountRetryQueued = false;
                 UseMountRouletteAfterTeleportOnFrameworkThread();
             },
-            delay: TimeSpan.FromSeconds(1));
+            delay: RandomizedDelay(1));
     }
 
     private void TryDismountAtFlag()
@@ -7161,7 +7206,7 @@ public sealed class Plugin : IDalamudPlugin
         AutoTreasureHuntStatus = TeleportTestStatus;
         _ = framework.RunOnTick(
             UseDismountAfterArrivalOnFrameworkThread,
-            delay: TimeSpan.FromMilliseconds(250));
+            delay: RandomizedDelayMilliseconds(250));
     }
 
     private unsafe void UseDismountAfterArrivalOnFrameworkThread()
@@ -7181,7 +7226,7 @@ public sealed class Plugin : IDalamudPlugin
             AutoTreasureHuntStatus = TeleportTestStatus;
             _ = framework.RunOnTick(
                 UseDismountAfterArrivalOnFrameworkThread,
-                delay: TimeSpan.FromSeconds(1));
+            delay: RandomizedDelay(1));
             return;
         }
 
@@ -7198,7 +7243,7 @@ public sealed class Plugin : IDalamudPlugin
                 AutoTreasureHuntStatus = TeleportTestStatus;
                 _ = framework.RunOnTick(
                     UseDismountAfterArrivalOnFrameworkThread,
-                    delay: TimeSpan.FromSeconds(2));
+                    delay: RandomizedDelay(2));
                 return;
             }
 
@@ -7206,7 +7251,7 @@ public sealed class Plugin : IDalamudPlugin
             AutoTreasureHuntStatus = TeleportTestStatus;
             _ = framework.RunOnTick(
                 UseDismountAfterArrivalOnFrameworkThread,
-                delay: TimeSpan.FromMilliseconds(500));
+                delay: RandomizedDelayMilliseconds(500));
             return;
         }
 
@@ -7219,7 +7264,7 @@ public sealed class Plugin : IDalamudPlugin
             AutoTreasureHuntStatus = TeleportTestStatus;
             _ = framework.RunOnTick(
                 UseDismountAfterArrivalOnFrameworkThread,
-                delay: TimeSpan.FromSeconds(1));
+            delay: RandomizedDelay(1));
             return;
         }
 
@@ -7229,7 +7274,7 @@ public sealed class Plugin : IDalamudPlugin
         AutoTreasureHuntStatus = TeleportTestStatus;
         _ = framework.RunOnTick(
             WaitForDismountThenDig,
-            delay: TimeSpan.FromMilliseconds(500));
+            delay: RandomizedDelayMilliseconds(500));
     }
 
     private void WaitForDismountThenDig()
@@ -7253,7 +7298,7 @@ public sealed class Plugin : IDalamudPlugin
             TeleportTestStatus = "已确认下坐骑，一秒后使用挖掘。";
             _ = framework.RunOnTick(
                 UseDigOnFrameworkThread,
-                delay: TimeSpan.FromSeconds(1));
+            delay: RandomizedDelay(1));
             return;
         }
 
@@ -7268,7 +7313,7 @@ public sealed class Plugin : IDalamudPlugin
                 AutoTreasureHuntStatus = TeleportTestStatus;
                 _ = framework.RunOnTick(
                     UseDismountAfterArrivalOnFrameworkThread,
-                    delay: TimeSpan.FromSeconds(2));
+                    delay: RandomizedDelay(2));
                 return;
             }
 
@@ -7277,13 +7322,13 @@ public sealed class Plugin : IDalamudPlugin
             AutoTreasureHuntStatus = TeleportTestStatus;
             _ = framework.RunOnTick(
                 UseDismountAfterArrivalOnFrameworkThread,
-                delay: TimeSpan.FromMilliseconds(500));
+                delay: RandomizedDelayMilliseconds(500));
             return;
         }
 
         _ = framework.RunOnTick(
             WaitForDismountThenDig,
-            delay: TimeSpan.FromMilliseconds(500));
+            delay: RandomizedDelayMilliseconds(500));
     }
 
     private unsafe void UseDismountForTestOnFrameworkThread()
@@ -7384,7 +7429,7 @@ public sealed class Plugin : IDalamudPlugin
                 digRetryQueued = false;
                 UseDigOnFrameworkThread();
             },
-            delay: TimeSpan.FromSeconds(1));
+            delay: RandomizedDelay(1));
     }
 
     private string StartTreasureChestSearch()
@@ -7780,7 +7825,7 @@ public sealed class Plugin : IDalamudPlugin
                                 StartAutoTreasureHuntOnFrameworkThread();
                             }
                         },
-                        delay: TimeSpan.FromSeconds(1));
+            delay: RandomizedDelay(1));
                     return;
                 }
 
@@ -7800,7 +7845,7 @@ public sealed class Plugin : IDalamudPlugin
                             StartAutoTreasureHuntOnFrameworkThread();
                         }
                     },
-                    delay: TimeSpan.FromSeconds(1));
+                        delay: RandomizedDelay(1));
                 return;
             }
 
@@ -8025,7 +8070,7 @@ public sealed class Plugin : IDalamudPlugin
                     UseTreasureMapOnFrameworkThread();
                 }
             },
-            delay: TimeSpan.FromSeconds(1));
+            delay: RandomizedDelay(1));
     }
 
     private void ScheduleDecipherRetry()
@@ -8051,6 +8096,6 @@ public sealed class Plugin : IDalamudPlugin
                 decipherRetryQueued = false;
                 UseTreasureMapOnFrameworkThread();
             },
-            delay: TimeSpan.FromSeconds(1));
+            delay: RandomizedDelay(1));
     }
 }
