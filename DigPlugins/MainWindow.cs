@@ -292,6 +292,21 @@ public sealed class MainWindow
 
     private void DrawTestPage()
     {
+        ImGui.Separator();
+        ImGui.Text("动画锁测试");
+        var animationLockEnabled = plugin.AnimationLockOverrideEnabled;
+        var animationLockMilliseconds = plugin.AnimationLockOverrideMilliseconds;
+        var animationLockChanged = ImGui.Checkbox("启用动画锁覆盖##AnimationLock", ref animationLockEnabled);
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(140f);
+        animationLockChanged |= ImGui.InputInt("动画锁 (毫秒)##AnimationLock", ref animationLockMilliseconds);
+        animationLockMilliseconds = Math.Clamp(animationLockMilliseconds, 0, 2000);
+        if (animationLockChanged)
+        {
+            plugin.SetAnimationLockOverride(animationLockEnabled, animationLockMilliseconds);
+        }
+        ImGui.TextDisabled("仅对本地角色动作生效；输入 0 会将动画锁设为 0。启用后需重新执行动作验证。" );
+
         var testButtonsInRow = 0;
         void ContinueTestButtonRow()
         {

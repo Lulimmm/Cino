@@ -84,6 +84,8 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
     private int customRequestAttempts;
     private string customStatus = string.Empty;
     private readonly List<MarketBoardListing> customListings = new();
+    private readonly Dictionary<ulong, bool> listingQuality = new();
+    private int customQualityFilter;
     private ulong customListingsSignature;
     private string customSearchText = string.Empty;
     private readonly List<(uint Id, string Name, uint Level)> customItemResults = new();
@@ -120,12 +122,27 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
         fireCallbackHook.Enable();
         marketBoard.PurchaseRequested += OnPurchaseRequested;
         marketBoard.ItemPurchased += OnItemPurchased;
+        marketBoard.OfferingsReceived += OnOfferingsReceived;
     }
 
     public uint ItemId { get; set; }
     public string SearchText { get; set; } = string.Empty;
     public string Status { get; private set; } = string.Empty;
     public bool SessionActive => sessionActive;
+
+    private bool MatchesQuality(ulong listingId)
+    {
+        if (customQualityFilter == 0)
+            return true;
+        return listingQuality.TryGetValue(listingId, out var isHq) &&
+            ((customQualityFilter == 1 && !isHq) || (customQualityFilter == 2 && isHq));
+    }
+
+    private void OnOfferingsReceived(IMarketBoardCurrentOfferings offerings)
+    {
+        foreach (var listing in offerings.ItemListings)
+            listingQuality[listing.ListingId] = listing.IsHq;
+    }
 
     public void OpenCustomMarketUi()
     {
@@ -277,11 +294,28 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
         ImGui.SetCursorPosX(36);
         ImGui.TextWrapped(customStatus);
 
-        if (ImGui.BeginTable("marketListings", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY,
+        ImGui.SetCursorPosX(36);
+        var qualityLabel = customQualityFilter switch
+        {
+            1 => "NQ（普通品质）",
+            2 => "HQ（高品质）",
+            _ => "全部品质",
+        };
+        ImGui.SetNextItemWidth(160);
+        if (ImGui.BeginCombo("物品质量##customMarket", qualityLabel))
+        {
+            if (ImGui.Selectable("全部品质", customQualityFilter == 0)) customQualityFilter = 0;
+            if (ImGui.Selectable("NQ（普通品质）", customQualityFilter == 1)) customQualityFilter = 1;
+            if (ImGui.Selectable("HQ（高品质）", customQualityFilter == 2)) customQualityFilter = 2;
+            ImGui.EndCombo();
+        }
+
+        if (ImGui.BeginTable("marketListings", 5, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY,
                 new System.Numerics.Vector2(-1, 330)))
         {
             ImGui.TableSetupColumn("行");
             ImGui.TableSetupColumn("数量");
+            ImGui.TableSetupColumn("质量");
             ImGui.TableSetupColumn("单价");
             ImGui.TableSetupColumn("操作");
             ImGui.TableHeadersRow();
@@ -302,6 +336,8 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
                 if (ImGui.IsItemHovered())
                     DrawItemTooltip(listing.ItemId);
                 ImGui.TableNextColumn(); ImGui.Text(listing.Quantity.ToString());
+                ImGui.TableNextColumn();
+                ImGui.Text(listingQuality.TryGetValue(listing.ListingId, out var isHq) && isHq ? "HQ" : "NQ");
                 ImGui.TableNextColumn();
                 ImGui.TextColored(new System.Numerics.Vector4(0.95f, 0.78f, 0.35f, 1f), listing.UnitPrice.ToString("N0"));
                 ImGui.TableNextColumn();
@@ -718,6 +754,8 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
         if (info->ListingCount == 0)
             return;
         ulong signature = 1469598103934665603UL;
+        signature ^= (uint)customQualityFilter;
+        signature *= 1099511628211UL;
         for (var i = 0; i < info->ListingCount; i++)
         {
             var row = info->Listings[i];
@@ -726,6 +764,8 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
             signature ^= row.UnitPrice;
             signature *= 1099511628211UL;
             signature ^= row.Quantity;
+            signature *= 1099511628211UL;
+            signature ^= (uint)(listingQuality.TryGetValue(row.ListingId, out var rowIsHq) && rowIsHq ? 1 : 0);
             signature *= 1099511628211UL;
         }
         if (signature == customListingsSignature)
@@ -736,7 +776,8 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
         for (var i = 0; i < info->ListingCount; i++)
         {
             var listing = info->Listings[i];
-            if (listing.ListingId != 0 && listing.ItemId == customSearchItemId && listing.UnitPrice != 0)
+            if (listing.ListingId != 0 && listing.ItemId == customSearchItemId && listing.UnitPrice != 0 &&
+                MatchesQuality(listing.ListingId))
                 customListings.Add(listing);
         }
         customStatus = customListings.Count == 0 ? "当前没有匹配报价。" : "报价已更新，可选择商品购买。";
@@ -746,6 +787,13 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
 
     private void SubmitCustomMarketPurchase(MarketBoardListing listing)
     {
+        if (!MatchesQuality(listing.ListingId))
+        {
+            customStatus = customQualityFilter == 2
+                ? "当前报价不是 HQ，已拒绝购买。"
+                : "当前报价不是 NQ，已拒绝购买。";
+            return;
+        }
         if (listing.ItemId != customSearchItemId || listing.ListingId == 0 || listing.UnitPrice == 0)
         {
             customStatus = "报价已过期或不属于当前搜索商品，请刷新。";
@@ -1639,6 +1687,7 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
     {
         marketBoard.PurchaseRequested -= OnPurchaseRequested;
         marketBoard.ItemPurchased -= OnItemPurchased;
+        marketBoard.OfferingsReceived -= OnOfferingsReceived;
         fireCallbackHook.Dispose();
     }
 }

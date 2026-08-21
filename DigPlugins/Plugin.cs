@@ -157,6 +157,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly OpenMarketAnywhere openMarketAnywhere;
     private readonly GlobetrotterTreasureMapCore globetrotterTreasureMapCore;
     private readonly VfxEffectCenterProbe vfxEffectCenterProbe;
+    private readonly AnimationLockController animationLockController;
     private CredentialRole sessionCredentialRole;
     private bool validationServerCheckInProgress;
     private DateTime validationServerLastCheckedAt;
@@ -439,6 +440,14 @@ public sealed class Plugin : IDalamudPlugin
             configuration.LogicMode = TreasureHuntLogicMode.Head;
         }
 
+        animationLockController = new AnimationLockController(
+            objectTable,
+            interop,
+            sigScanner,
+            log,
+            () => configuration.AnimationLockOverrideEnabled && HasDeveloperCredential,
+            () => configuration.AnimationLockOverrideMilliseconds);
+
         coordinateApplier = new CoordinateApplier(objectTable, SaveConfiguration);
         openMarketAnywhere = new OpenMarketAnywhere(framework, gameGui, log, interop, marketBoard, dataManager, textureProvider);
         globetrotterTreasureMapCore = new GlobetrotterTreasureMapCore(
@@ -663,6 +672,17 @@ public sealed class Plugin : IDalamudPlugin
 
     public float OtherPluginTestZ => configuration.OtherPluginTestZ;
 
+    public bool AnimationLockOverrideEnabled => configuration.AnimationLockOverrideEnabled;
+
+    public int AnimationLockOverrideMilliseconds => configuration.AnimationLockOverrideMilliseconds;
+
+    public void SetAnimationLockOverride(bool enabled, int milliseconds)
+    {
+        configuration.AnimationLockOverrideEnabled = enabled;
+        configuration.AnimationLockOverrideMilliseconds = Math.Clamp(milliseconds, 0, 2000);
+        SaveConfiguration();
+    }
+
     public bool IsAutoMapSupplementEnabled => configuration.AutoMapSupplementEnabled;
 
     public void SetOtherPluginTestCoordinates(float x, float y, float z)
@@ -814,6 +834,7 @@ public sealed class Plugin : IDalamudPlugin
         gameInventory.InventoryChanged -= OnInventoryChanged;
         chatGui.ChatMessage -= OnChatMessage;
         openMarketAnywhere.Dispose();
+        animationLockController.Dispose();
         gameGui.HoveredItemChanged -= globetrotterTreasureMapCore.OnHover;
         globetrotterTreasureMapCore.Dispose();
         commandManager.RemoveHandler("/lltp");

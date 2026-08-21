@@ -31,6 +31,10 @@ public sealed class PluginConfiguration : IPluginConfiguration
 
     public float OtherPluginTestZ { get; set; }
 
+    public bool AnimationLockOverrideEnabled { get; set; }
+
+    public int AnimationLockOverrideMilliseconds { get; set; } = 550;
+
 }
 
 public enum CredentialRole
