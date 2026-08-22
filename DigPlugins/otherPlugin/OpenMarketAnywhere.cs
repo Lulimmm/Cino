@@ -5,6 +5,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Textures;
 using Dalamud.Interface.Textures.TextureWraps;
 using Lumina.Excel.Sheets;
+using FFXIVClientStructs.FFXIV.Client.Enums;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Client.UI.Info;
@@ -76,6 +77,9 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
     private byte capturedSearchBlockingAddons;
     private ushort capturedSearchBlockedParentId;
     private bool customMarketOpen;
+    private bool nativeItemDetailShown;
+    private bool nativeDetailHoverThisFrame;
+    private bool nativeDetailRetryQueued;
     private string customItemIdText = string.Empty;
     private uint customSearchItemId;
     private int customSelectedRow = -1;
@@ -157,6 +161,8 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
         if (!customMarketOpen)
             return;
 
+        nativeDetailHoverThisFrame = false;
+
         EnsureNativeMarketCategories();
 
         var open = customMarketOpen;
@@ -220,7 +226,7 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
                     break;
                 }
                 if (ImGui.IsItemHovered())
-                    DrawItemTooltip(result.Id);
+                    DrawNativeStyleItemTooltip(result.Id);
             }
             ImGui.EndChild();
         }
@@ -334,7 +340,7 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
                 if (ImGui.Selectable(itemName, customSelectedRow == i))
                     customSelectedRow = i;
                 if (ImGui.IsItemHovered())
-                    DrawItemTooltip(listing.ItemId);
+                    DrawNativeStyleItemTooltip(listing.ItemId);
                 ImGui.TableNextColumn(); ImGui.Text(listing.Quantity.ToString());
                 ImGui.TableNextColumn();
                 ImGui.Text(listingQuality.TryGetValue(listing.ListingId, out var isHq) && isHq ? "HQ" : "NQ");
@@ -355,6 +361,11 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
         ImGui.SameLine();
         if (ImGui.Button("关闭"))
             customMarketOpen = false;
+        if (!nativeDetailHoverThisFrame && nativeItemDetailShown)
+        {
+            HideNativeItemDetail();
+            nativeItemDetailShown = false;
+        }
         ImGui.PopStyleVar();
         ImGui.PopStyleColor(12);
         ImGui.SetWindowFontScale(1f);
@@ -599,14 +610,105 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
             ImGui.Dummy(new System.Numerics.Vector2(size, size));
     }
 
-    private void DrawItemTooltip(uint itemId)
+    private void DrawNativeStyleItemTooltip(uint itemId)
     {
         var item = dataManager.GetExcelSheet<Item>().GetRowOrDefault(itemId);
         if (item == null)
             return;
 
+        ImGui.PushStyleColor(ImGuiCol.PopupBg, new System.Numerics.Vector4(0.92f, 0.78f, 0.57f, 0.97f));
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, new System.Numerics.Vector4(0.92f, 0.78f, 0.57f, 0.97f));
+        ImGui.PushStyleColor(ImGuiCol.ChildBg, new System.Numerics.Vector4(0.92f, 0.78f, 0.57f, 0.97f));
+        ImGui.PushStyleColor(ImGuiCol.Text, new System.Numerics.Vector4(0.18f, 0.12f, 0.08f, 1f));
+        ImGui.PushStyleColor(ImGuiCol.TextDisabled, new System.Numerics.Vector4(0.30f, 0.22f, 0.14f, 1f));
         ImGui.BeginTooltip();
-        DrawItemIcon(itemId, 40);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new System.Numerics.Vector2(12, 10));
+        DrawItemIcon(itemId, 48);
+        ImGui.SameLine();
+        ImGui.BeginGroup();
+        ImGui.TextColored(new System.Numerics.Vector4(0.42f, 0.78f, 0.16f, 1f), item.Value.Name.ToString());
+        ImGui.TextDisabled($"物品 [{itemId}]");
+        ImGui.TextDisabled(item.Value.IsUntradable ? "不可交易" : "可交易");
+        ImGui.EndGroup();
+        ImGui.Separator();
+
+        ImGui.BeginTable("nativeStyleItemHeader", 2, ImGuiTableFlags.SizingFixedFit);
+        ImGui.TableNextColumn(); ImGui.Text($"物品等级  {item.Value.LevelItem.RowId}");
+        ImGui.TableNextColumn(); ImGui.Text($"装备品级  {item.Value.LevelEquip}");
+        ImGui.TableNextColumn(); ImGui.Text($"稀有度  {item.Value.Rarity}");
+        ImGui.TableNextColumn(); ImGui.Text($"物品分类  {item.Value.ItemUICategory.RowId}");
+        ImGui.EndTable();
+
+        if (item.Value.DamagePhys > 0 || item.Value.DamageMag > 0 || item.Value.Delayms > 0)
+        {
+            ImGui.BeginTable("nativeStyleWeaponStats", 3, ImGuiTableFlags.SizingStretchProp);
+            ImGui.TableNextColumn(); ImGui.Text("物理基本性能");
+            ImGui.TableNextColumn(); ImGui.Text("物理自动攻击");
+            ImGui.TableNextColumn(); ImGui.Text("攻击间隔");
+            ImGui.TableNextColumn(); ImGui.TextColored(new System.Numerics.Vector4(0.65f, 0.12f, 0.08f, 1f), item.Value.DamagePhys.ToString());
+            ImGui.TableNextColumn(); ImGui.Text(item.Value.DamageMag.ToString());
+            ImGui.TableNextColumn(); ImGui.Text((item.Value.Delayms / 1000f).ToString("0.00"));
+            ImGui.EndTable();
+        }
+
+        DrawOptionalItemFields(item.Value, ("物理防御", "DefensePhys", "PhysicalDefense"),
+            ("魔法防御", "DefenseMag", "MagicDefense"), ("物理攻击", "DamagePhys", "PhysicalDamage"),
+            ("魔法攻击", "DamageMag", "MagicDamage"), ("攻击间隔", "DelayMs", "Delay"));
+
+        ImGui.Separator();
+        ImGui.Text("[市场]");
+        ImGui.TextColored(new System.Numerics.Vector4(0.84f, 0.38f, 0.12f, 1f),
+            item.Value.IsUntradable ? "不可在市场出售" : "可在市场出售");
+
+        var classJob = dataManager.GetExcelSheet<ClassJobCategory>()?.GetRowOrDefault(item.Value.ClassJobCategory.RowId);
+        if (classJob.HasValue)
+        {
+            var jobs = GetClassJobNames(classJob.Value);
+            if (jobs.Count > 0)
+                ImGui.TextWrapped($"使用职业：{string.Join("、", jobs)}");
+        }
+
+        DrawBaseParameterLines(item.Value);
+        if (item.Value.MateriaSlotCount > 0)
+        {
+            ImGui.Separator();
+            ImGui.Text($"魔晶石工艺  槽位 {item.Value.MateriaSlotCount}");
+            for (var slot = 0; slot < item.Value.MateriaSlotCount; slot++)
+                ImGui.BulletText("未镶嵌");
+        }
+
+        ImGui.Separator();
+        ImGui.Text("制作与修理");
+        DrawOptionalItemFields(item.Value, ("耐久度", "Durability", "MaxDurability"),
+            ("精制度", "Craftsmanship", "Control"), ("修理等级", "RepairClassJob", "RepairClass"),
+            ("修理材料", "RepairItem", "RepairMaterial"), ("收购价格", "PriceLow", "PriceMid"));
+
+        var description = item.Value.Description.ToString();
+        if (!string.IsNullOrWhiteSpace(description))
+        {
+            ImGui.Separator();
+            ImGui.Text("物品说明");
+            ImGui.TextWrapped(description);
+        }
+        ImGui.PopStyleColor(5);
+        ImGui.PopStyleVar();
+        ImGui.EndTooltip();
+    }
+
+    private void DrawItemTooltip(uint itemId)
+    {
+        // The market uses a self-drawn tooltip. Do not open or hide the native
+        // ItemDetail addon here: it is driven by the game's hovered item only.
+        var item = dataManager.GetExcelSheet<Item>().GetRowOrDefault(itemId);
+        if (item == null)
+            return;
+
+        ImGui.PushStyleColor(ImGuiCol.PopupBg, new System.Numerics.Vector4(0.18f, 0.22f, 0.30f, 0.98f));
+        ImGui.PushStyleColor(ImGuiCol.Text, new System.Numerics.Vector4(0.96f, 0.93f, 0.86f, 1f));
+        ImGui.PushStyleColor(ImGuiCol.TextDisabled, new System.Numerics.Vector4(0.78f, 0.82f, 0.88f, 1f));
+        ImGui.BeginTooltip();
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new System.Numerics.Vector2(12, 10));
+        DrawItemIcon(itemId, 48);
         ImGui.SameLine();
         ImGui.BeginGroup();
         ImGui.Text(item.Value.Name.ToString());
@@ -624,6 +726,21 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
         if (item.Value.MateriaSlotCount > 0)
             ImGui.Text($"魔晶石：可镶嵌 {item.Value.MateriaSlotCount} 个");
 
+        DrawOptionalItemFields(item.Value,
+            ("物理防御", "DefensePhys", "PhysicalDefense"),
+            ("魔法防御", "DefenseMag", "MagicDefense"),
+            ("物理攻击", "DamagePhys", "PhysicalDamage"),
+            ("魔法攻击", "DamageMag", "MagicDamage"),
+            ("攻击间隔", "DelayMs", "Delay"));
+
+        ImGui.Separator();
+        ImGui.Text("制作与修理");
+        DrawOptionalItemFields(item.Value,
+            ("耐久度", "Durability", "MaxDurability"),
+            ("精制度", "Craftsmanship", "Control"),
+            ("修理等级", "RepairClassJob", "RepairClass"),
+            ("收购价格", "PriceLow", "PriceMid"));
+
         var classJobSheet = dataManager.GetExcelSheet<ClassJobCategory>();
         var classJobCategory = classJobSheet?.GetRowOrDefault(item.Value.ClassJobCategory.RowId);
         if (classJobCategory.HasValue)
@@ -640,10 +757,143 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
             ImGui.Spacing();
             ImGui.TextWrapped(description);
         }
+        ImGui.PopStyleColor(3);
+        ImGui.PopStyleVar();
         ImGui.EndTooltip();
     }
 
+    private static string? ReadItemNumber<T>(T item, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            var property = typeof(T).GetProperty(name);
+            if (property == null)
+                continue;
+            var value = property.GetValue(item);
+            if (value == null)
+                continue;
+            var text = Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture);
+            if (!string.IsNullOrWhiteSpace(text) && text != "0")
+                return text;
+        }
+        return null;
+    }
+
+    private static void DrawOptionalItemFields<T>(T item, params (string Label, string Name, string Fallback)[] fields)
+    {
+        foreach (var field in fields)
+        {
+            var value = ReadItemNumber(item, field.Name, field.Fallback);
+            if (!string.IsNullOrWhiteSpace(value))
+                ImGui.Text($"{field.Label}：{value}");
+        }
+    }
+
+    private unsafe bool TryShowNativeItemDetail(uint itemId)
+    {
+        var agent = AgentItemDetail.Instance();
+        if (agent == null || itemId == 0)
+            return false;
+
+        agent->DetailKind = DetailKind.ItemSearchResult;
+        agent->TypeOrId = itemId;
+        agent->ItemId = itemId;
+        agent->Index = 0;
+        agent->BuyQuantity = -1;
+        agent->MaxStackSize = 99;
+        agent->Flag1 = 0;
+        agent->Flag2 = 1;
+        agent->Flag3 = 0;
+        agent->Update(1);
+        agent->ShowAddon();
+        agent->Show();
+        var addon = gameGui.GetAddonByName<AddonItemDetail>("ItemDetail");
+        if (addon != null)
+        {
+            addon->Open(0);
+            var mouse = ImGui.GetMousePos();
+            addon->SetPosition(
+                (short)Math.Clamp(mouse.X + 18f, short.MinValue, short.MaxValue),
+                (short)Math.Clamp(mouse.Y + 18f, short.MinValue, short.MaxValue));
+            addon->Show(disableShowTransition: true, unsetShowHideFlags: 0);
+        }
+        nativeItemDetailShown = agent->IsAddonShown();
+        if (!nativeItemDetailShown)
+        {
+            // Some client builds only accept the direct-ID detail kind when
+            // the market result addon has not initialized its item context.
+            agent->DetailKind = DetailKind.ItemId;
+            agent->TypeOrId = itemId;
+            agent->ItemId = itemId;
+            agent->Flag2 = 1;
+            agent->Flag3 = 0;
+            agent->ShowAddon();
+            agent->Show();
+            nativeItemDetailShown = agent->IsAddonShown();
+        }
+        nativeDetailHoverThisFrame = nativeItemDetailShown;
+        if (!nativeItemDetailShown && !nativeDetailRetryQueued)
+        {
+            nativeDetailRetryQueued = true;
+            _ = framework.RunOnTick(() =>
+            {
+                nativeDetailRetryQueued = false;
+                TryShowNativeItemDetail(itemId);
+            }, delay: TimeSpan.FromMilliseconds(50));
+        }
+        return nativeItemDetailShown;
+    }
+
+    private unsafe void HideNativeItemDetail()
+    {
+        var addon = gameGui.GetAddonByName<AddonItemDetail>("ItemDetail");
+        if (addon != null)
+            addon->Hide(disableHideTransition: true, callCloseCallback: false, setShowHideFlags: 0);
+        var agent = AgentItemDetail.Instance();
+        if (agent != null && agent->IsAddonShown())
+            agent->HideAddon();
+    }
+
+
     private void DrawBaseParameterLines(Item item)
+    {
+        var baseParamSheet = dataManager.GetExcelSheet<BaseParam>();
+        if (baseParamSheet == null)
+            return;
+
+        var rows = new List<(string Name, short Value)>();
+        for (var i = 0; i < 6 && i < item.BaseParamValue.Count; i++)
+        {
+            var value = item.BaseParamValue[i];
+            var row = baseParamSheet.GetRowOrDefault(item.BaseParam[i].RowId);
+            if (value != 0 && row.HasValue &&
+                !row.Value.Name.ToString().Contains("物理基本性能", StringComparison.Ordinal) &&
+                !row.Value.Name.ToString().Contains("魔法基本性能", StringComparison.Ordinal))
+                rows.Add((row.Value.Name.ToString(), value));
+        }
+        if (rows.Count == 0)
+            return;
+
+        ImGui.Separator();
+        ImGui.Text("特殊");
+        if (ImGui.BeginTable("nativeItemParameters", 2, ImGuiTableFlags.SizingStretchProp))
+        {
+            for (var i = 0; i < rows.Count; i += 2)
+            {
+                ImGui.TableNextRow();
+                ImGui.TableNextColumn();
+                ImGui.Text($"{rows[i].Name} +{rows[i].Value}");
+                if (i + 1 < rows.Count)
+                {
+                    ImGui.TableNextColumn();
+                    ImGui.Text($"{rows[i + 1].Name} +{rows[i + 1].Value}");
+                }
+            }
+            ImGui.EndTable();
+        }
+    }
+
+    private void DrawLegacyBaseParameterLines(Item item)
     {
         var baseParamSheet = dataManager.GetExcelSheet<BaseParam>();
         if (baseParamSheet == null)

@@ -525,12 +525,23 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnLlMarketCommand(string command, string arguments)
     {
-        if (!EnsureAdvancedCommandAccess())
+        if (!EnsureMarketCommandAccess())
         {
             return;
         }
 
         TestOtherPluginOpenMarket();
+    }
+
+    private bool EnsureMarketCommandAccess()
+    {
+        if (IsCredentialValidated)
+            return true;
+
+        const string message = "请先在验证页面输入有效凭证后使用远程市场。";
+        OtherPluginTestStatus = message;
+        chatGui.PrintError(message, "海豹助手");
+        return false;
     }
 
 

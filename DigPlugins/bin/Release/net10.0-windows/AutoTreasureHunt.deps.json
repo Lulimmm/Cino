@@ -6,7 +6,7 @@
   "compilationOptions": {},
   "targets": {
     ".NETCoreApp,Version=v10.0": {
-      "AutoTreasureHunt/1.0.6.3": {
+      "AutoTreasureHunt/1.0.6.4": {
         "runtime": {
           "AutoTreasureHunt.dll": {}
         }
@@ -14,7 +14,7 @@
     }
   },
   "libraries": {
-    "AutoTreasureHunt/1.0.6.3": {
+    "AutoTreasureHunt/1.0.6.4": {
       "type": "project",
       "serviceable": false,
       "sha512": ""
