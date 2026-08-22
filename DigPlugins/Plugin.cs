@@ -1031,9 +1031,16 @@ public sealed class Plugin : IDalamudPlugin
 
             if (!response.IsSuccessStatusCode)
             {
+                if (root.TryGetProperty("error", out var accountBindingError) &&
+                    accountBindingError.ValueKind == JsonValueKind.String &&
+                    accountBindingError.GetString() == "account_bound_to_another_credential")
+                {
+                    credentialValidationError = "当前账号已有绑定的用户凭证";
+                    return false;
+                }
                 credentialValidationError = root.TryGetProperty("error", out var error)
                     && error.ValueKind == JsonValueKind.String
-                    && error.GetString() == "credential_bound_to_another_account"
+                    && (error.GetString() == "credential_bound_to_another_account" || error.GetString() == "account_bound_to_another_credential")
                     ? "凭证绑定的不是此账号"
                     : "凭证无效";
                 return false;

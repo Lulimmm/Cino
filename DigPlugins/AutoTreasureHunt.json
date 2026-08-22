@@ -4,14 +4,14 @@
     "Description": "自动处理藏宝图、补图、传送和寻路流程。",
     "Punchline": "处理一些琐事",
   "InternalName": "AutoTreasureHunt",
-  "AssemblyVersion": "1.0.6.5",
+  "AssemblyVersion": "1.0.6.6",
   "ApplicableVersion": "any",
     "Tags": [
       "挖宝",
       "自动"
     ],
   "RepoUrl": "https://github.com/Lulimmm/Cino",
-  "IconUrl": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/DigPlugins/icon-v1.png?plugin=AutoTreasureHunt-1.0.6.5",
+  "IconUrl": "https://raw.githubusercontent.com/Lulimmm/Cino/refs/heads/main/DigPlugins/icon-v1.png?plugin=AutoTreasureHunt-1.0.6.6",
   "DalamudApiLevel": 15,
   "LoadRequiredState": 0,
   "LoadSync": false,
