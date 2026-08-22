@@ -5811,6 +5811,11 @@ public sealed class Plugin : IDalamudPlugin
         HandleRouletteTarget(exit, "退出点", TimeSpan.FromSeconds(2), confirmExit: true);
     }
 
+    public void TestMarketBannerPath()
+    {
+        OtherPluginTestStatus = openMarketAnywhere.GetMarketBannerPath();
+    }
+
     private void TryHandleRouletteExitTest()
     {
         if (!IsHeadLogicSelected || condition[ConditionFlag.InCombat])

@@ -409,6 +409,11 @@ public sealed class MainWindow
             plugin.TestOtherPluginOpenMarket();
         }
 
+        if (ImGui.Button("测试市场图片路径##OtherPlugin"))
+        {
+            plugin.TestMarketBannerPath();
+        }
+
         ImGui.TextWrapped(plugin.OtherPluginTestStatus);
         ImGui.TextWrapped(plugin.OtherPluginMarketStatus);
         ImGui.TextDisabled("市场测试：可从任意地点打开原生搜索界面；该界面不保证具有服务器购买会话。");

@@ -134,6 +134,18 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
     public string Status { get; private set; } = string.Empty;
     public bool SessionActive => sessionActive;
 
+    public string GetMarketBannerPath()
+    {
+        var path = GetInstalledPluginBannerPath();
+        return $"path={path}; exists={File.Exists(path)}";
+    }
+
+    private static string GetInstalledPluginBannerPath()
+    {
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        return Path.Combine(appData, "XIVLauncherCN", "installedPlugins", "AutoTreasureHunt", "1.0.6.5", "Resources", "dny.jpg");
+    }
+
     private bool MatchesQuality(ulong listingId)
     {
         if (customQualityFilter == 0)
@@ -379,13 +391,11 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
         if (!marketBannerLoadAttempted)
         {
             marketBannerLoadAttempted = true;
-            var packagedPath = Path.Combine(AppContext.BaseDirectory, "Resources", "dny.jpg");
-            var desktopPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "dny.jpg");
-            var path = File.Exists(packagedPath) ? packagedPath : desktopPath;
+            var path = GetInstalledPluginBannerPath();
             if (File.Exists(path))
                 marketBannerTexture = textureProvider.GetFromFile(path);
             else
-                log.Warning("Market banner image not found: packagedPath={PackagedPath}, desktopPath={DesktopPath}", packagedPath, desktopPath);
+                log.Warning("Market banner image not found: path={Path}", path);
         }
 
         if (marketBannerTexture == null || !marketBannerTexture.TryGetWrap(out var wrap, out _))
