@@ -285,6 +285,7 @@ public sealed class Plugin : IDalamudPlugin
     private uint wheelDoorSelectionLastMapId;
     private ulong wheelDoorSelectionChestEntityId;
     private bool wheelDoorSelectionChestMoveIssued;
+    private uint wheelBmraiEnabledMapId;
     private int decipherRetryCount;
     private bool decipherRetryQueued;
     private bool questDecipherRetryQueued;
@@ -295,6 +296,7 @@ public sealed class Plugin : IDalamudPlugin
     private int dismountReadyAttemptCount;
     private int dismountUseAttemptCount;
     private DateTime wheelTeleportAcceptAt;
+    private DateTime wheelTeleportInviteClickAt;
     private bool wheelTeleportAcceptSubmitted;
     private string wheelTeleportAcceptedPrompt = string.Empty;
     private bool wheelWasInCombat;
@@ -308,6 +310,15 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime wheelPendingMapLinkDeadline;
     private bool wheelAwaitingMapChangeAndFlag;
     private uint wheelTeleportSourceMapId;
+    private uint wheelTeleportSourceTerritoryId;
+    private bool wheelCrossMapTeleportExpected;
+    private uint wheelObservedMapId;
+    private uint wheelObservedTerritoryId;
+    private DateTime wheelMapChangedAt;
+    private bool wheelTeleportSourcePositionValid;
+    private float wheelTeleportSourceX;
+    private float wheelTeleportSourceY;
+    private float wheelTeleportSourceZ;
     private DateTime wheelFlagReadyAt;
     private DateTime wheelTeleportStallSampleAt;
     private float wheelTeleportStallSampleX;
@@ -3752,6 +3763,19 @@ public sealed class Plugin : IDalamudPlugin
         if (!IsWheelLogicSelected || emergencyStopActive)
             return;
 
+        // 车轮进入转盘或选门地图后立即开启战斗辅助；每张地图只发送一次。
+        var isWheelCombatMap = IsRouletteMap || clientState.MapId == 896;
+        if (isWheelCombatMap && wheelBmraiEnabledMapId != clientState.MapId)
+        {
+            commandManager.ProcessCommand("/bmrai on");
+            wheelBmraiEnabledMapId = clientState.MapId;
+            AutoTreasureHuntStatus = $"车轮：进入地图 {clientState.MapId}，已执行 /bmrai on。";
+        }
+        else if (!isWheelCombatMap)
+        {
+            wheelBmraiEnabledMapId = 0;
+        }
+
         // 车轮进入转盘副本地图时改由退出点流程接管，不继续运行野外红旗/坐骑寻路。
         // 车轮不处理宝箱或潜网巡梦，避免干预车头的副本交互。
         if (IsRouletteMap)
@@ -3781,6 +3805,8 @@ public sealed class Plugin : IDalamudPlugin
     private unsafe void OnFrameworkUpdate(IFramework framework)
     {
         openMarketAnywhere.Update();
+
+        TrackWheelMapChange();
 
         if (!IsCredentialValidated || !CanRunAutomationOrTest)
         {
@@ -4025,6 +4051,33 @@ public sealed class Plugin : IDalamudPlugin
         ResetWheelMapLinkPending();
         commandManager.ProcessCommand("/vnav stop");
         wheelLastMapLink = CloneMapLink(mapLink);
+        // 在收到地图链接时就固定本轮传送来源，避免后续窗口或切图流程覆盖。
+        wheelTeleportSourceMapId = clientState.MapId;
+        wheelTeleportSourceTerritoryId = clientState.TerritoryType;
+        wheelCrossMapTeleportExpected = clientState.MapId != mapLink.Map.RowId ||
+            clientState.TerritoryType != mapLink.TerritoryType.RowId;
+        // 补图红旗可能在地图 12 传送完成后才到达车轮；此时角色已经在
+        // 目标地图，无法再从当前地图反推出来源，按补图跨地图轮次处理。
+        if (clientState.MapId == mapLink.Map.RowId &&
+            clientState.TerritoryType == mapLink.TerritoryType.RowId &&
+            mapLink.Map.RowId != OptimizedInteractionMapId)
+        {
+            wheelCrossMapTeleportExpected = true;
+        }
+        if (clientState.MapId == mapLink.Map.RowId &&
+            clientState.TerritoryType == mapLink.TerritoryType.RowId &&
+            wheelMapChangedAt != default &&
+            DateTime.UtcNow - wheelMapChangedAt <= TimeSpan.FromSeconds(15))
+        {
+            wheelCrossMapTeleportExpected = true;
+        }
+        if (objectTable.LocalPlayer != null)
+        {
+            wheelTeleportSourcePositionValid = true;
+            wheelTeleportSourceX = objectTable.LocalPlayer.Position.X;
+            wheelTeleportSourceY = objectTable.LocalPlayer.Position.Y;
+            wheelTeleportSourceZ = objectTable.LocalPlayer.Position.Z;
+        }
         // 每个聊天地图链接都开始新的车轮红旗轮次，清除地图 12
         // 或上一轮流程遗留的完成状态。
         wheelLastProcessedRound = -1;
@@ -4094,9 +4147,7 @@ public sealed class Plugin : IDalamudPlugin
         {
             var confirmationAddon = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
             if (confirmationAddon != null && confirmationAddon->IsReady && confirmationAddon->IsVisible)
-            {
                 return;
-            }
         }
 
         if (wheelPendingMapLinkDeadline != default &&
@@ -4111,6 +4162,22 @@ public sealed class Plugin : IDalamudPlugin
 
         var mapLink = wheelPendingMapLink;
         var mapLinkGeneration = wheelPendingMapLinkGeneration;
+        // 补图流程通常在地图 12 处理新红旗；在真正打开地图链接前固定
+        // 来源地图，避免后续切图/红旗刷新把跨地图轮次误判为同地图。
+        if (clientState.MapId == OptimizedInteractionMapId)
+        {
+            wheelTeleportSourceMapId = clientState.MapId;
+            wheelTeleportSourceTerritoryId = clientState.TerritoryType;
+            wheelCrossMapTeleportExpected = mapLink.Map.RowId != clientState.MapId ||
+                mapLink.TerritoryType.RowId != clientState.TerritoryType;
+            if (objectTable.LocalPlayer != null)
+            {
+                wheelTeleportSourcePositionValid = true;
+                wheelTeleportSourceX = objectTable.LocalPlayer.Position.X;
+                wheelTeleportSourceY = objectTable.LocalPlayer.Position.Y;
+                wheelTeleportSourceZ = objectTable.LocalPlayer.Position.Z;
+            }
+        }
         CaptureWheelFlagSnapshot();
         if (gameGui.OpenMapWithMapLink(mapLink))
         {
@@ -4126,7 +4193,6 @@ public sealed class Plugin : IDalamudPlugin
             wheelAwaitingMapChangeAndFlag = true;
             wheelNewFlagPending = true;
             wheelWaitingForFreshFlag = true;
-            wheelTeleportSourceMapId = clientState.MapId;
             wheelFlagReadyAt = DateTime.UtcNow.AddSeconds(1);
             wheelFlagRefreshRequestedAt = DateTime.UtcNow;
             // Capturing a flag is not proof that the teleport invitation was accepted.
@@ -4180,7 +4246,7 @@ public sealed class Plugin : IDalamudPlugin
     private unsafe void TryHandleWheelLogic()
     {
         var addon = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
-        if (addon == null || !addon->IsReady || !addon->IsVisible || addon->PromptText == null)
+        if (addon == null || !addon->IsReady || !addon->IsVisible)
         {
             if (wheelTeleportAcceptSubmitted && wheelAwaitingMapChangeAndFlag)
             {
@@ -4191,13 +4257,25 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        var prompt = addon->PromptText->NodeText.ToString();
+        var prompt = addon->PromptText == null
+            ? string.Empty
+            : addon->PromptText->NodeText.ToString();
         var telepo = Telepo.Instance();
         var isTeleportRequest = telepo != null && telepo->ActiveTeleportRequest;
+        var isWheelPendingInvitation = wheelNewFlagPending &&
+            wheelWaitingForFreshFlag &&
+            wheelLastMapLink != null &&
+            wheelActiveMapLinkGeneration != 0 &&
+            wheelActiveMapLinkGeneration == wheelMapLinkGeneration;
         var isMap12TeleportRequest = clientState.MapId == OptimizedInteractionMapId &&
             (isTeleportRequest ||
              prompt.Contains("传送邀请", StringComparison.Ordinal) ||
              prompt.Contains("接受前往", StringComparison.Ordinal));
+        if (isWheelPendingInvitation)
+        {
+            isTeleportRequest = true;
+        }
+
         if (!isTeleportRequest &&
             !isMap12TeleportRequest &&
             !prompt.Contains("要返回到", StringComparison.Ordinal) &&
@@ -4245,8 +4323,14 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        // 车轮是否接受邀请按车轮自身的位置判断：比较自身到红旗
+        // 与最近传送水晶到红旗的距离。
+        var sameMapAsFlag = wheelLastMapLink != null &&
+            clientState.MapId == wheelLastMapLink.Map.RowId &&
+            clientState.TerritoryType == wheelLastMapLink.TerritoryType.RowId;
         if (wheelNewFlagPending &&
             wheelWaitingForFreshFlag &&
+            sameMapAsFlag &&
             TryUseWheelDirectFlagNavigation(out var playerDistanceSquared, out var aetheryteDistanceSquared))
         {
             // 当前地图内步行/飞行比从最近可用水晶重新传送更近：关闭传送邀请，
@@ -4266,7 +4350,7 @@ public sealed class Plugin : IDalamudPlugin
                 mountRetryQueued = false;
                 mountAttemptCount = 0;
                 ScheduleMountRouletteRetry();
-                AutoTreasureHuntStatus = $"车轮：当前距离红旗更近（角色 {MathF.Sqrt(playerDistanceSquared):F1}，最近水晶 {MathF.Sqrt(aetheryteDistanceSquared):F1}），不传送并直接前往红旗。";
+                AutoTreasureHuntStatus = $"车轮：自身距离红旗更近（自身 {MathF.Sqrt(playerDistanceSquared):F1}，最近水晶 {MathF.Sqrt(aetheryteDistanceSquared):F1}），已拒绝邀请并直接前往红旗。";
             }
             else
             {
@@ -4286,7 +4370,6 @@ public sealed class Plugin : IDalamudPlugin
             wheelTeleportAcceptedPrompt = prompt;
             wheelAwaitingMapChangeAndFlag = hasPendingFlagNavigation;
             wheelWaitingForFreshFlag = hasPendingFlagNavigation;
-            wheelTeleportSourceMapId = clientState.MapId;
             wheelFlagReadyAt = hasPendingFlagNavigation
                 ? DateTime.UtcNow.AddSeconds(1)
                 : default;
@@ -4310,6 +4393,66 @@ public sealed class Plugin : IDalamudPlugin
     /// 当角色和新红旗已在同一地图时，比较角色与该地图内最近可用水晶到红旗的距离。
     /// 只有角色严格更近时才返回 true；无法读取红旗或水晶坐标时维持原传送行为。
     /// </summary>
+    private unsafe bool TryHeadWouldSkipTeleport(uint mapId, uint territoryId)
+    {
+        var mapAgent = AgentMap.Instance();
+        if (mapAgent == null || mapAgent->FlagMarkerCount == 0 || partyList.Count == 0)
+            return false;
+
+        var flag = mapAgent->FlagMapMarkers[0];
+        if (flag.MapId != mapId || flag.TerritoryId != territoryId)
+            return false;
+
+        var localEntityId = objectTable.LocalPlayer?.EntityId ?? 0;
+        var head = partyList.FirstOrDefault(member =>
+            member.EntityId != 0 && member.EntityId != localEntityId &&
+            member.Territory.RowId == territoryId && member.GameObject != null);
+        if (head?.GameObject == null)
+            return false;
+
+        var headDeltaX = head.GameObject.Position.X - flag.XFloat;
+        var headDeltaY = head.GameObject.Position.Y - flag.YFloat;
+        var headDistanceSquared = headDeltaX * headDeltaX + headDeltaY * headDeltaY;
+        var nearestAetheryteDistanceSquared = float.PositiveInfinity;
+        foreach (var entry in aetheryteList)
+        {
+            if (entry.TerritoryId != territoryId)
+                continue;
+            var aetheryte = entry.AetheryteData.Value;
+            if (!aetheryte.IsAetheryte || aetheryte.Map.RowId != mapId ||
+                !TryGetAetheryteWorldPosition(aetheryte, mapId, out var x, out var y))
+                continue;
+            var dx = x - flag.XFloat;
+            var dy = y - flag.YFloat;
+            nearestAetheryteDistanceSquared = MathF.Min(
+                nearestAetheryteDistanceSquared, dx * dx + dy * dy);
+        }
+
+        return !float.IsPositiveInfinity(nearestAetheryteDistanceSquared) &&
+               headDistanceSquared < nearestAetheryteDistanceSquared;
+    }
+
+    private void TrackWheelMapChange()
+    {
+        if (!IsWheelLogicSelected || clientState.MapId == 0 || clientState.TerritoryType == 0)
+            return;
+
+        if (wheelObservedMapId == 0)
+        {
+            wheelObservedMapId = clientState.MapId;
+            wheelObservedTerritoryId = clientState.TerritoryType;
+            return;
+        }
+
+        if (wheelObservedMapId != clientState.MapId ||
+            wheelObservedTerritoryId != clientState.TerritoryType)
+        {
+            wheelObservedMapId = clientState.MapId;
+            wheelObservedTerritoryId = clientState.TerritoryType;
+            wheelMapChangedAt = DateTime.UtcNow;
+        }
+    }
+
     private unsafe bool TryUseWheelDirectFlagNavigation(
         out float playerDistanceSquared,
         out float nearestAetheryteDistanceSquared)
@@ -4546,31 +4689,188 @@ public sealed class Plugin : IDalamudPlugin
         // 同地图红旗无需等待传送确认；跨地图仍必须先接受传送。
         var flagBelongsToCurrentMap = currentMapId == wheelLastMapLink.Map.RowId &&
             clientState.TerritoryType == wheelLastMapLink.TerritoryType.RowId;
-        if (!flagBelongsToCurrentMap)
+        var crossMapTeleportExpected = wheelCrossMapTeleportExpected;
+        var mapIdChangedAfterTeleport = wheelTeleportSourceMapId != 0 &&
+            (currentMapId != wheelTeleportSourceMapId ||
+             clientState.TerritoryType != wheelTeleportSourceTerritoryId);
+
+        // 以实际读取到地图红旗标点的时刻作为红旗获取时间，而不是聊天消息时间。
+        var mapAgentForFlagTime = AgentMap.Instance();
+        var actualFlagLoaded = mapAgentForFlagTime != null &&
+            mapAgentForFlagTime->FlagMarkerCount > 0 &&
+            mapAgentForFlagTime->FlagMapMarkers[0].MapId == currentMapId &&
+            mapAgentForFlagTime->FlagMapMarkers[0].TerritoryId == clientState.TerritoryType;
+        if (flagBelongsToCurrentMap && actualFlagLoaded &&
+            wheelMapChangedAt != default &&
+            DateTime.UtcNow - wheelMapChangedAt <= TimeSpan.FromSeconds(15))
+        {
+            crossMapTeleportExpected = true;
+            wheelCrossMapTeleportExpected = true;
+        }
+
+        // 跨地图时目标地图尚未加载，不能先用地图匹配条件拦截确认框。
+        // 先处理原生传送邀请，完成状态仍由后面的地图/坐标变化判断决定。
+        var earlyInvitation = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
+        if (earlyInvitation != null && earlyInvitation->IsReady && earlyInvitation->IsVisible)
+        {
+            if (wheelTeleportInviteClickAt == default)
+            {
+                wheelTeleportInviteClickAt = DateTime.UtcNow.AddMilliseconds(500);
+                AutoTreasureHuntStatus = "车轮：已发现传送邀请，0.5 秒后确认“是”。";
+                return;
+            }
+
+            if (DateTime.UtcNow < wheelTeleportInviteClickAt)
+                return;
+
+            if (earlyInvitation->FireCallbackInt(0))
+            {
+                wheelTeleportInviteClickAt = default;
+                wheelTeleportAcceptSubmitted = true;
+                AutoTreasureHuntStatus = "车轮：已点击传送邀请“是”，等待地图或坐标变化确认传送完成。";
+            }
+            else
+            {
+                wheelTeleportInviteClickAt = DateTime.UtcNow.AddMilliseconds(250);
+                AutoTreasureHuntStatus = "车轮：传送邀请确认尚未接受，0.25 秒后重试。";
+            }
+        }
+
+        if (!flagBelongsToCurrentMap && !mapIdChangedAfterTeleport)
         {
             AutoTreasureHuntStatus = "车轮：已获取新红旗，等待接受传送邀请后再进行寻路。";
             return;
         }
 
-        if (flagBelongsToCurrentMap && !wheelTeleportAcceptSubmitted)
+        // 跨地图只要检测到地图 ID 已从传送前地图发生变化，就直接进入红旗寻路，
+        // 不等待目标红旗坐标再次匹配；只有同地图传送才使用坐标跳变判断。
+        if (mapIdChangedAfterTeleport)
         {
-            // A matching map alone does not mean the native invitation was accepted.
-            // When the head did not invite (or the wheel is already closer), direct
-            // navigation is valid; otherwise keep waiting for the invitation callback.
-            if (!TryUseWheelDirectFlagNavigation(out _, out _))
-            {
-                AutoTreasureHuntStatus = "车轮：已获取新红旗，等待传送邀请确认后再进行寻路。";
-                return;
-            }
+            wheelNewFlagPending = false;
+            wheelWaitingForFreshFlag = false;
+            wheelAwaitingMapChangeAndFlag = false;
+            wheelTeleportAcceptSubmitted = false;
+            wheelTeleportAcceptedPrompt = string.Empty;
+            wheelTeleportSourceMapId = 0;
+            wheelTeleportSourcePositionValid = false;
+            wheelFlagReadyAt = default;
+            mountAfterTeleportPending = true;
+            mountRetryQueued = false;
+            mountAttemptCount = 0;
+            AutoTreasureHuntStatus = "车轮：已检测到地图 ID 变化，直接上坐骑前往红旗。";
+            UseMountRouletteAfterTeleportOnFrameworkThread();
+            return;
+        }
 
+        // 同地图传送不会产生地图 ID 变化；如果确认窗口未被卫月识别，
+        // 用传送前后角色坐标的大幅跳变确认已经落到同地图水晶。
+        if (flagBelongsToCurrentMap &&
+            crossMapTeleportExpected)
+        {
+            wheelNewFlagPending = false;
+            wheelWaitingForFreshFlag = false;
+            wheelAwaitingMapChangeAndFlag = false;
+            wheelTeleportAcceptSubmitted = false;
+            wheelTeleportAcceptedPrompt = string.Empty;
+            wheelTeleportSourceMapId = 0;
+            wheelTeleportSourcePositionValid = false;
+            wheelFlagReadyAt = default;
+            mountAfterTeleportPending = true;
+            mountRetryQueued = false;
+            mountAttemptCount = 0;
+            AutoTreasureHuntStatus = "车轮：已到达跨地图传送目标地图，直接上坐骑前往红旗。";
+            UseMountRouletteAfterTeleportOnFrameworkThread();
+            return;
+        }
+
+        // 传送已经结束、红旗随后才刷新时，若角色就在该红旗最近的
+        // 传送水晶附近，直接进入坐骑寻路，不再等待坐标跳变。
+        if (flagBelongsToCurrentMap && wheelTeleportAcceptSubmitted &&
+            HasWheelSameMapTeleportJump() && IsWheelNearFlagAetheryte())
+        {
+            wheelNewFlagPending = false;
+            wheelWaitingForFreshFlag = false;
+            wheelAwaitingMapChangeAndFlag = false;
+            wheelTeleportAcceptSubmitted = false;
+            wheelTeleportSourceMapId = 0;
+            wheelTeleportSourceTerritoryId = 0;
+            wheelTeleportSourcePositionValid = false;
+            wheelFlagReadyAt = default;
+            mountAfterTeleportPending = true;
+            mountRetryQueued = false;
+            mountAttemptCount = 0;
+            AutoTreasureHuntStatus = "车轮：已在红旗最近传送水晶附近，直接上坐骑前往红旗。";
+            UseMountRouletteAfterTeleportOnFrameworkThread();
+            return;
+        }
+
+        if (flagBelongsToCurrentMap &&
+            HasWheelSameMapTeleportJump())
+        {
             wheelNewFlagPending = false;
             wheelWaitingForFreshFlag = false;
             wheelAwaitingMapChangeAndFlag = false;
             wheelTeleportSourceMapId = 0;
+            wheelTeleportSourcePositionValid = false;
+            wheelFlagReadyAt = default;
             mountAfterTeleportPending = true;
             mountRetryQueued = false;
             mountAttemptCount = 0;
-            AutoTreasureHuntStatus = "车轮：当前已在目标地图且距离红旗更近，直接开始前往。";
+            AutoTreasureHuntStatus = "车轮：检测到同地图传送后坐标已跳变，开始上坐骑前往红旗。";
+            UseMountRouletteAfterTeleportOnFrameworkThread();
+            return;
+        }
+
+        // 不再检测 SelectYesno 或 Telepo 邀请状态。跨地图以地图 ID 变化确认，
+        // 同地图以传送前后角色坐标发生明显跳变确认。
+        // 保留自动点击“是”的动作，但不把确认框作为传送完成依据。
+        var invitation = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
+        if (invitation != null && invitation->IsReady && invitation->IsVisible)
+        {
+            if (wheelTeleportInviteClickAt == default)
+            {
+                wheelTeleportInviteClickAt = DateTime.UtcNow.AddMilliseconds(500);
+                AutoTreasureHuntStatus = "车轮：已发现传送邀请，0.5 秒后确认“是”。";
+                return;
+            }
+
+            if (DateTime.UtcNow < wheelTeleportInviteClickAt)
+                return;
+
+            invitation->FireCallbackInt(0);
+            wheelTeleportInviteClickAt = default;
+            wheelTeleportAcceptSubmitted = true;
+            AutoTreasureHuntStatus = "车轮：已点击传送邀请“是”，等待地图或坐标变化确认传送完成。";
+        }
+        else
+        {
+            wheelTeleportInviteClickAt = default;
+        }
+
+        var crossMapArrived = wheelTeleportSourceMapId != 0 &&
+            currentMapId != wheelTeleportSourceMapId;
+        var sameMapArrived = flagBelongsToCurrentMap && HasWheelSameMapTeleportJump();
+        if (!crossMapArrived && !sameMapArrived)
+        {
+            AutoTreasureHuntStatus = flagBelongsToCurrentMap
+                ? "车轮：等待同地图传送完成，监测角色坐标跳变。"
+                : "车轮：等待传送完成，监测地图 ID 变化。";
+            return;
+        }
+
+        {
+            wheelNewFlagPending = false;
+            wheelWaitingForFreshFlag = false;
+            wheelAwaitingMapChangeAndFlag = false;
+            wheelTeleportAcceptSubmitted = false;
+            wheelTeleportAcceptedPrompt = string.Empty;
+            wheelTeleportSourceMapId = 0;
+            wheelFlagReadyAt = default;
+            mountAfterTeleportPending = true;
+            mountRetryQueued = false;
+            mountAttemptCount = 0;
+            wheelTeleportSourcePositionValid = false;
+            AutoTreasureHuntStatus = "车轮：已确认传送完成，开始上坐骑前往红旗。";
             UseMountRouletteAfterTeleportOnFrameworkThread();
             return;
         }
@@ -5816,6 +6116,76 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         HandleRouletteTarget(exit, "退出点", TimeSpan.FromSeconds(2), confirmExit: true);
+    }
+
+    private unsafe bool IsWheelNearFlagAetheryte()
+    {
+        var player = objectTable.LocalPlayer;
+        var mapAgent = AgentMap.Instance();
+        if (player == null || mapAgent == null || mapAgent->FlagMarkerCount == 0)
+            return false;
+
+        var flag = mapAgent->FlagMapMarkers[0];
+        if (flag.MapId != clientState.MapId || flag.TerritoryId != clientState.TerritoryType)
+            return false;
+
+        var nearestDistanceSquared = float.PositiveInfinity;
+        foreach (var entry in aetheryteList)
+        {
+            if (entry.TerritoryId != flag.TerritoryId)
+                continue;
+
+            var aetheryte = entry.AetheryteData.Value;
+            if (!aetheryte.IsAetheryte ||
+                !TryGetAetheryteWorldPosition(aetheryte, flag.MapId, out var x, out var y))
+                continue;
+
+            var flagDx = x - flag.XFloat;
+            var flagDy = y - flag.YFloat;
+            var flagDistanceSquared = flagDx * flagDx + flagDy * flagDy;
+            if (flagDistanceSquared < nearestDistanceSquared)
+                nearestDistanceSquared = flagDistanceSquared;
+        }
+
+        if (float.IsPositiveInfinity(nearestDistanceSquared))
+            return false;
+
+        foreach (var entry in aetheryteList)
+        {
+            if (entry.TerritoryId != flag.TerritoryId)
+                continue;
+
+            var aetheryte = entry.AetheryteData.Value;
+            if (!aetheryte.IsAetheryte ||
+                !TryGetAetheryteWorldPosition(aetheryte, flag.MapId, out var x, out var y))
+                continue;
+
+            var flagDx = x - flag.XFloat;
+            var flagDy = y - flag.YFloat;
+            if (flagDx * flagDx + flagDy * flagDy > nearestDistanceSquared + 0.01f)
+                continue;
+
+            var playerDx = player.Position.X - x;
+            var playerDy = player.Position.Y - y;
+            // 传送落点、卫月水晶坐标和角色实际坐标可能存在偏差，
+            // 以 50 yalms 作为“位于最近水晶附近”的判定范围。
+            return playerDx * playerDx + playerDy * playerDy <= 100f * 100f;
+        }
+
+        return false;
+    }
+
+    private bool HasWheelSameMapTeleportJump()
+    {
+        var player = objectTable.LocalPlayer;
+        if (!wheelTeleportSourcePositionValid || player == null ||
+            wheelTeleportSourceMapId != clientState.MapId)
+            return false;
+
+        var dx = player.Position.X - wheelTeleportSourceX;
+        var dy = player.Position.Y - wheelTeleportSourceY;
+        var dz = player.Position.Z - wheelTeleportSourceZ;
+        return dx * dx + dy * dy + dz * dz >= 400f;
     }
 
     public void TestMarketBannerPath()
