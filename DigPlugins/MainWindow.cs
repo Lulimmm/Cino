@@ -116,6 +116,15 @@ public sealed class MainWindow
                 ? StoppedColor
                 : new Vector4(0.95f, 0.75f, 0.25f, 1.00f);
         ImGui.TextColored(serverStatusColor, plugin.ValidationServerStatusText);
+
+        // 显示当前登录角色的 ContentId（CID），便于用户确认凭证绑定的账号。
+        var accountIdColor = plugin.CurrentAccountId != 0
+            ? RunningColor
+            : new Vector4(0.95f, 0.75f, 0.25f, 1.00f);
+        ImGui.Text("当前账号 CID：");
+        ImGui.SameLine();
+        ImGui.TextColored(accountIdColor, plugin.CurrentAccountIdText);
+
         ImGui.SetNextItemWidth(-1);
         if (ImGui.InputText("###Credential", ref credentialInput, 128, ImGuiInputTextFlags.Password | ImGuiInputTextFlags.EnterReturnsTrue))
         {

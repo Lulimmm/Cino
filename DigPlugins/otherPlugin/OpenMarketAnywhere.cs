@@ -142,8 +142,7 @@ public sealed unsafe class OpenMarketAnywhere : IDisposable
 
     private static string GetInstalledPluginBannerPath()
     {
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        return Path.Combine(appData, "XIVLauncherCN", "installedPlugins", "AutoTreasureHunt", "1.0.6.6", "Resources", "dny.jpg");
+        return EmbeddedDnyImage.GetImagePath();
     }
 
     private bool MatchesQuality(ulong listingId)

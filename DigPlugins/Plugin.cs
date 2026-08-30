@@ -163,6 +163,8 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime validationServerLastCheckedAt;
     private bool? validationServerConnected;
     private string credentialValidationError = string.Empty;
+    // 当前角色的 ContentId（CID）。在框架线程更新，供验证页面显示及提交验证时使用。
+    private ulong currentAccountId;
     private readonly MainWindow mainWindow;
     private bool selectMapPending;
     private bool confirmMapPending;
@@ -615,6 +617,15 @@ public sealed class Plugin : IDalamudPlugin
     public bool? ValidationServerConnected => validationServerConnected;
 
     public string CredentialValidationError => credentialValidationError;
+
+    /// <summary>
+    /// 当前登录角色的 CID。为 0 表示游戏尚未准备好或暂时无法读取。
+    /// </summary>
+    public ulong CurrentAccountId => currentAccountId;
+
+    public string CurrentAccountIdText => currentAccountId == 0
+        ? "未读取到 CID"
+        : currentAccountId.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     public string ValidationServerStatusText => validationServerConnected switch
     {
@@ -3807,6 +3818,10 @@ public sealed class Plugin : IDalamudPlugin
         openMarketAnywhere.Update();
 
         TrackWheelMapChange();
+
+        // 验证页在未验证状态下也需要显示 CID，因此必须在凭证状态检查之前更新。
+        // 该读取发生在框架线程，避免从 ImGui 绘制线程直接访问角色内存。
+        currentAccountId = GetLocalAccountId();
 
         if (!IsCredentialValidated || !CanRunAutomationOrTest)
         {
