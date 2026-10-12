@@ -72,6 +72,11 @@ public sealed class Plugin : IDalamudPlugin
     private const uint OptimizedInteractionMapId = 12;
     private const uint RouletteExitBaseId = 2000139;
     private const float RouletteInteractionDistance = 2f;
+    // Door collision geometry can prevent vnavmesh from reaching the object
+    // center. 3.5 yalms is close enough for the game interaction range while
+    // allowing the interaction to fire before movement stalls at the hitbox.
+    private const float DoorSelectionInteractionDistance = 3.5f;
+    private static readonly TimeSpan DoorSelectionVfxTravelDelay = TimeSpan.FromSeconds(5);
     private const float FlagNavigationMeaningfulProgressDistance = 1.5f;
     private static readonly TimeSpan FlagNavigationJitterTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan FlagNavigationMaximumDuration = TimeSpan.FromSeconds(75);
@@ -84,7 +89,6 @@ public sealed class Plugin : IDalamudPlugin
     private const string LicenseValidationEndpoint = "https://1466827323-7rwdj63720.ap-shanghai.tencentscf.com/v1/validate";
     private const string LicenseHealthEndpoint = "https://1466827323-7rwdj63720.ap-shanghai.tencentscf.com/health";
     private static readonly HttpClient LicenseHttpClient = new() { Timeout = TimeSpan.FromSeconds(10) };
-
     // Action scheduling uses bounded jitter to avoid identical retry cadence while
     // keeping short framework waits responsive. Timeout thresholds remain fixed.
     private static TimeSpan RandomizedDelay(TimeSpan baseDelay)
@@ -256,7 +260,10 @@ public sealed class Plugin : IDalamudPlugin
     private bool doorSelectionPortalEntryPending;
     private bool doorSelectionModeActive;
     private uint doorSelectionInstanceMapId;
+    private bool doorSelectionFloorDetectionPending;
+    private uint doorSelectionFloorEvidenceBaseId;
     private ulong doorSelectionChestEntityId;
+    private ulong doorSelectionInitialChestEntityId;
     private bool doorSelectionChestMoveIssued;
     private bool doorSelectionChestPositionSampleValid;
     private float doorSelectionChestSampleX;
@@ -267,20 +274,41 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime doorSelectionChestConfirmDeadline;
     private bool doorSelectionInitialChestCompleted;
     private bool doorSelectionPostCombatChestPending;
-    private DateTime doorSelectionPostCombatChestSearchAt;
-    private DateTime doorSelectionPostCombatChestSearchDeadline;
+    private readonly HashSet<ulong> doorSelectionPostCombatChestInteractAcceptedEntities = [];
+    private DateTime doorSelectionPostCombatChestRetryAt;
+    private DateTime doorSelectionPostCombatChestEmptySince;
     private DateTime doorSelectionDutyReadyAt;
     private bool doorSelectionWasInCombat;
     private bool doorSelectionCombatStartedThisFloor;
     private bool doorSelectionInitialChestYesConfirmed;
-    private bool doorSelectionCombatObservedAfterYes;
     private bool doorSelectionPostCombatChestHandled;
     private int doorSelectionFloor;
+    private int doorSelectionRuntimeChoiceFloor;
+    private DoorSelectionChoice? doorSelectionRuntimeChoice;
+    private DoorSelectionChoice? doorSelectionLastGlowingDoorChoice;
+    private DateTime doorSelectionLastGlowingDoorMessageAt;
+    private string doorSelectionLastGlowingDoorMessage = string.Empty;
     private ulong doorSelectionDoorEntityId;
+    private uint doorSelectionInteractedDoorBaseId;
     private bool doorSelectionDoorMoveIssued;
     private DateTime doorSelectionDoorAnimationUntil;
+    private bool confirmDoorSelectionDoorPending;
+    private DateTime doorSelectionDoorConfirmDeadline;
+    private bool doorSelectionDoorYesConfirmed;
     private bool doorSelectionVfxMoveIssued;
     private System.Numerics.Vector3 doorSelectionVfxPosition;
+    private DateTime doorSelectionVfxTravelUntil;
+    private ulong doorSelectionExitEntityId;
+    private bool doorSelectionExitMoveIssued;
+    private bool doorSelectionExitPositionSampleValid;
+    private float doorSelectionExitSampleX;
+    private float doorSelectionExitSampleY;
+    private float doorSelectionExitSampleZ;
+    private DateTime doorSelectionExitPositionStableSince;
+    private bool confirmDoorSelectionExitPending;
+    private DateTime doorSelectionExitConfirmDeadline;
+    private bool doorSelectionExitConfirmed;
+    private DateTime doorSelectionExitMapChangeDeadline;
     private int wheelDoorSelectionFloor;
     private uint wheelDoorSelectionDoorBaseId;
     private ulong wheelDoorSelectionDoorEntityId;
@@ -720,6 +748,10 @@ public sealed class Plugin : IDalamudPlugin
 
     public string FieldMarkerTestStatus { get; private set; } = "尚未获取场地标记坐标。";
 
+    public string DoorSelectionFloorDetectionTestStatus { get; private set; } = "尚未检测当前选门层数。";
+
+    public string DoorSelectionGlowingDoorTestStatus { get; private set; } = "尚未测试门发光消息。";
+
     public string OtherPluginTestStatus { get; private set; } = "OtherPlugin feature not tested yet.";
 
     public string OtherPluginMarketStatus => openMarketAnywhere.Status;
@@ -898,6 +930,16 @@ public sealed class Plugin : IDalamudPlugin
             default: return;
         }
         pluginInterface.SavePluginConfig(configuration);
+    }
+
+    private DoorSelectionChoice GetActiveDoorSelectionChoice(int floor)
+    {
+        if (doorSelectionRuntimeChoiceFloor == floor && doorSelectionRuntimeChoice.HasValue)
+        {
+            return doorSelectionRuntimeChoice.Value;
+        }
+
+        return GetDoorSelectionChoice(floor - 1);
     }
 
     public string SelectedTreasureMapRouteName => TreasureMapDefinitions.HeadTreasureMapOptions[selectedTreasureMapIndex].Route switch
@@ -1851,6 +1893,30 @@ public sealed class Plugin : IDalamudPlugin
         });
     }
 
+    public void TestDetectDoorSelectionFloor()
+    {
+        DoorSelectionFloorDetectionTestStatus = "正在读取最近门 BaseID...";
+        _ = framework.RunOnFrameworkThread(TestDetectDoorSelectionFloorOnFrameworkThread);
+    }
+
+    private unsafe void TestDetectDoorSelectionFloorOnFrameworkThread()
+    {
+        var hasDoorFloor = TryDetectDoorSelectionFloorFromNearestDoor(
+            out var doorFloor,
+            out var doorBaseId);
+
+        if (hasDoorFloor)
+        {
+            DoorSelectionFloorDetectionTestStatus =
+                $"当前选门层数：第 {doorFloor} 层；来源：最近门 BaseID {doorBaseId}。";
+            PrintEcho(DoorSelectionFloorDetectionTestStatus);
+            return;
+        }
+
+        DoorSelectionFloorDetectionTestStatus = "当前选门层数：第 1 层（默认；未检测到可识别的最近门 BaseID）。";
+        PrintEcho(DoorSelectionFloorDetectionTestStatus);
+    }
+
     public void TestNavigateToDoorSelectionPortalVfx()
     {
         EffectCenterTestStatus = "正在查找传送阵 VFX 中心并启动 vnavmesh 导航...";
@@ -2124,12 +2190,24 @@ public sealed class Plugin : IDalamudPlugin
         doorSelectionModeActive = false;
         doorSelectionInstanceMapId = 0;
         doorSelectionWasInCombat = false;
+        doorSelectionFloorDetectionPending = false;
+        doorSelectionFloorEvidenceBaseId = 0;
         doorSelectionPostCombatChestHandled = false;
-        doorSelectionFloor = 1;
+        doorSelectionFloor = 0;
+        doorSelectionRuntimeChoiceFloor = 0;
+        doorSelectionRuntimeChoice = null;
+        doorSelectionLastGlowingDoorChoice = null;
+        doorSelectionLastGlowingDoorMessageAt = default;
+        doorSelectionLastGlowingDoorMessage = string.Empty;
         doorSelectionDoorEntityId = 0;
+        doorSelectionInteractedDoorBaseId = 0;
         doorSelectionDoorMoveIssued = false;
         doorSelectionDoorAnimationUntil = default;
+        confirmDoorSelectionDoorPending = false;
+        doorSelectionDoorConfirmDeadline = default;
+        doorSelectionDoorYesConfirmed = false;
         doorSelectionVfxMoveIssued = false;
+        doorSelectionVfxTravelUntil = default;
         ResetDoorSelectionChestState(resetCompleted: true);
 
         marketBoardAfterTeleportPending = false;
@@ -4106,6 +4184,13 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnChatMessage(IChatMessage message)
     {
+        if (TryRecordDoorSelectionGlowingDoorMessage(message.Message.TextValue, out var glowingChoice) &&
+            doorSelectionModeActive &&
+            !emergencyStopActive)
+        {
+            TryApplyDoorSelectionGlowingDoorChoice(glowingChoice, updateTestStatus: false);
+        }
+
         if (!IsWheelLogicSelected ||
             emergencyStopActive ||
             message.LogKind is not (XivChatType.Party or XivChatType.CrossParty))
@@ -4196,6 +4281,83 @@ public sealed class Plugin : IDalamudPlugin
         wheelDoorSelectionAnimationUntil = DateTime.UtcNow.AddSeconds(2);
         wheelDoorSelectionVfxMoveIssued = false;
         AutoTreasureHuntStatus = $"车轮：收到车头第 {wheelDoorSelectionFloor} 层门信息（BaseID {baseId}），等待门动画结束。";
+    }
+
+    private static bool TryParseDoorSelectionGlowingDoorChoice(
+        string text,
+        out DoorSelectionChoice choice)
+    {
+        if (text.Contains("左侧的门发光了", StringComparison.Ordinal) ||
+            text.Contains("左边的门发光了", StringComparison.Ordinal))
+        {
+            choice = DoorSelectionChoice.Left;
+            return true;
+        }
+
+        if (text.Contains("右侧的门发光了", StringComparison.Ordinal) ||
+            text.Contains("右边的门发光了", StringComparison.Ordinal))
+        {
+            choice = DoorSelectionChoice.Right;
+            return true;
+        }
+
+        choice = default;
+        return false;
+    }
+
+    private bool TryRecordDoorSelectionGlowingDoorMessage(
+        string text,
+        out DoorSelectionChoice choice)
+    {
+        if (!TryParseDoorSelectionGlowingDoorChoice(text, out choice))
+        {
+            return false;
+        }
+
+        doorSelectionLastGlowingDoorChoice = choice;
+        doorSelectionLastGlowingDoorMessageAt = DateTime.UtcNow;
+        doorSelectionLastGlowingDoorMessage = text;
+        return true;
+    }
+
+    private bool TryApplyDoorSelectionGlowingDoorChoice(
+        DoorSelectionChoice glowingChoice,
+        bool updateTestStatus)
+    {
+        if (doorSelectionFloor is < 1 or > 4 ||
+            doorSelectionDoorAnimationUntil != default ||
+            confirmDoorSelectionDoorPending)
+        {
+            return false;
+        }
+
+        doorSelectionRuntimeChoiceFloor = doorSelectionFloor;
+        doorSelectionRuntimeChoice = glowingChoice;
+        doorSelectionDoorEntityId = 0;
+        doorSelectionDoorMoveIssued = false;
+        var side = glowingChoice == DoorSelectionChoice.Left ? "左门" : "右门";
+        AutoTreasureHuntStatus = $"选门：检测到“{side}发光”，本层自动切换为{side}（仅当前副本生效）。";
+        if (updateTestStatus)
+        {
+            DoorSelectionGlowingDoorTestStatus =
+                $"已识别“{side}发光”消息，当前第 {doorSelectionFloor} 层运行时选择已切换为{side}。";
+        }
+
+        return true;
+    }
+
+    public void TestDetectDoorSelectionGlowingDoor()
+    {
+        if (!doorSelectionLastGlowingDoorChoice.HasValue)
+        {
+            DoorSelectionGlowingDoorTestStatus = "尚未捕获“左侧/右侧的门发光了！”实际聊天消息。";
+            return;
+        }
+
+        var side = doorSelectionLastGlowingDoorChoice == DoorSelectionChoice.Left ? "左" : "右";
+        var age = DateTime.UtcNow - doorSelectionLastGlowingDoorMessageAt;
+        DoorSelectionGlowingDoorTestStatus =
+            $"最近实际消息检测结果：{side}侧；原文：{doorSelectionLastGlowingDoorMessage}（{age.TotalSeconds:F1} 秒前）。";
     }
 
     private unsafe void TryProcessWheelMapLink()
@@ -5430,11 +5592,23 @@ public sealed class Plugin : IDalamudPlugin
         doorSelectionModeActive = true;
         doorSelectionInstanceMapId = clientState.MapId;
         doorSelectionWasInCombat = false;
+        doorSelectionFloorDetectionPending = true;
+        doorSelectionFloorEvidenceBaseId = 0;
         doorSelectionFloor = 1;
+        doorSelectionRuntimeChoiceFloor = 0;
+        doorSelectionRuntimeChoice = null;
+        doorSelectionLastGlowingDoorChoice = null;
+        doorSelectionLastGlowingDoorMessageAt = default;
+        doorSelectionLastGlowingDoorMessage = string.Empty;
         doorSelectionDoorEntityId = 0;
+        doorSelectionInteractedDoorBaseId = 0;
         doorSelectionDoorMoveIssued = false;
         doorSelectionDoorAnimationUntil = default;
+        confirmDoorSelectionDoorPending = false;
+        doorSelectionDoorConfirmDeadline = default;
+        doorSelectionDoorYesConfirmed = false;
         doorSelectionVfxMoveIssued = false;
+        doorSelectionVfxTravelUntil = default;
         ResetDoorSelectionChestState(resetCompleted: true);
         commandManager.ProcessCommand("/vnav stop");
         EnableAeAssistForTreasureInstance();
@@ -5502,7 +5676,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private static IReadOnlyList<uint> GetDoorSelectionCombatStartChestIds(int floor)
     {
-        return floor switch
+        var configuredIds = floor switch
         {
             1 => TreasureMapDefinitions.DoorSelectionCombatStartChestFloor1BaseIds,
             2 => TreasureMapDefinitions.DoorSelectionCombatStartChestFloor2BaseIds,
@@ -5511,6 +5685,16 @@ public sealed class Plugin : IDalamudPlugin
             5 => TreasureMapDefinitions.DoorSelectionCombatStartChestFloor5BaseIds,
             _ => [],
         };
+
+        if (configuredIds.Count > 0)
+        {
+            return configuredIds;
+        }
+
+        return TreasureMapDefinitions.DoorSelectionInitialChestBaseIds
+            .Concat(GetDoorSelectionCombatChestIds(floor))
+            .Distinct()
+            .ToArray();
     }
 
     private static IReadOnlyList<uint> GetDoorSelectionCombatChestIds(int floor)
@@ -5527,25 +5711,142 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     private Dalamud.Game.ClientState.Objects.Types.IGameObject? FindDoorSelectionChest(
-        IReadOnlyList<uint> preferredBaseIds)
+        IReadOnlyList<uint> preferredBaseIds,
+        bool requireBaseId,
+        IReadOnlySet<ulong>? excludedEntityIds = null,
+        bool prioritizeNoBaseId = false)
     {
-        var targetableChests = objectTable.Where(gameObject =>
-            IsTreasureChest(gameObject) &&
-            gameObject.IsTargetable);
+        var targetableChests = objectTable
+            .Where(gameObject =>
+                IsTreasureChest(gameObject) &&
+                gameObject.IsTargetable &&
+                (!requireBaseId || gameObject.BaseId != 0) &&
+                (excludedEntityIds == null || !excludedEntityIds.Contains(gameObject.EntityId)))
+            .ToArray();
 
         if (preferredBaseIds.Count > 0)
         {
-            var configuredChest = targetableChests.FirstOrDefault(gameObject =>
+            var configuredChests = targetableChests.Where(gameObject =>
                 preferredBaseIds.Contains(gameObject.BaseId));
-            if (configuredChest != null)
+            if (configuredChests.Any())
             {
-                return configuredChest;
+                targetableChests = configuredChests.ToArray();
             }
         }
 
-        // Some rooms expose no stable pre-combat BaseID. In that case the
-        // current room's targetable treasure coffer is the only reliable cue.
-        return targetableChests.FirstOrDefault();
+        var localPlayer = objectTable.LocalPlayer;
+        if (localPlayer == null)
+        {
+            return targetableChests.FirstOrDefault();
+        }
+
+        var orderedChests = prioritizeNoBaseId
+            ? targetableChests.OrderBy(gameObject => gameObject.BaseId == 0 ? 0 : 1)
+            : targetableChests.OrderBy(_ => 0);
+        return orderedChests
+            .ThenBy(gameObject => System.Numerics.Vector3.DistanceSquared(
+                localPlayer.Position,
+                gameObject.Position))
+            .FirstOrDefault();
+    }
+
+    private Dalamud.Game.ClientState.Objects.Types.IGameObject[] GetTargetableDoorSelectionChests() =>
+        objectTable
+            .Where(gameObject => IsTreasureChest(gameObject) && gameObject.IsTargetable)
+            .ToArray();
+
+    private static IReadOnlyList<uint> GetDoorSelectionLeftDoorIds(int floor) => floor switch
+    {
+        1 => TreasureMapDefinitions.DoorSelectionLeftDoorFloor1To2BaseIds,
+        2 => TreasureMapDefinitions.DoorSelectionLeftDoorFloor2To3BaseIds,
+        3 => TreasureMapDefinitions.DoorSelectionLeftDoorFloor3To4BaseIds,
+        4 => TreasureMapDefinitions.DoorSelectionLeftDoorFloor4To5BaseIds,
+        _ => [],
+    };
+
+    private static IReadOnlyList<uint> GetDoorSelectionRightDoorIds(int floor) => floor switch
+    {
+        1 => TreasureMapDefinitions.DoorSelectionRightDoorFloor1To2BaseIds,
+        2 => TreasureMapDefinitions.DoorSelectionRightDoorFloor2To3BaseIds,
+        3 => TreasureMapDefinitions.DoorSelectionRightDoorFloor3To4BaseIds,
+        4 => TreasureMapDefinitions.DoorSelectionRightDoorFloor4To5BaseIds,
+        _ => [],
+    };
+
+    private static bool TryGetDoorSelectionFloor(uint baseId, out int floor)
+    {
+        for (var candidateFloor = 1; candidateFloor <= 4; candidateFloor++)
+        {
+            if (GetDoorSelectionLeftDoorIds(candidateFloor).Contains(baseId) ||
+                GetDoorSelectionRightDoorIds(candidateFloor).Contains(baseId))
+            {
+                floor = candidateFloor;
+                return true;
+            }
+        }
+
+        floor = 0;
+        return false;
+    }
+
+    private bool TryDetectDoorSelectionFloorFromNearestDoor(out int floor, out uint baseId)
+    {
+        var doors = objectTable
+            .Where(gameObject =>
+                gameObject.IsTargetable &&
+                TryGetDoorSelectionFloor(gameObject.BaseId, out _))
+            .ToArray();
+        var localPlayer = objectTable.LocalPlayer;
+        var nearestDoor = localPlayer == null
+            ? doors.FirstOrDefault()
+            : doors
+                .OrderBy(gameObject => System.Numerics.Vector3.DistanceSquared(
+                    localPlayer.Position,
+                    gameObject.Position))
+                .FirstOrDefault();
+
+        if (nearestDoor == null || !TryGetDoorSelectionFloor(nearestDoor.BaseId, out floor))
+        {
+            floor = 0;
+            baseId = 0;
+            return false;
+        }
+
+        baseId = nearestDoor.BaseId;
+        return true;
+    }
+
+    private void TryResolveDoorSelectionFloorWithDefault()
+    {
+        if (!doorSelectionFloorDetectionPending)
+        {
+            return;
+        }
+
+        var hasDoorFloor = TryDetectDoorSelectionFloorFromNearestDoor(
+            out var doorFloor,
+            out var doorBaseId);
+
+        var canCorrectCurrentFloor =
+            !doorSelectionInitialChestCompleted &&
+            !doorSelectionCombatStartedThisFloor &&
+            !doorSelectionPostCombatChestPending &&
+            !confirmDoorSelectionChestPending;
+
+        if (!canCorrectCurrentFloor)
+        {
+            return;
+        }
+
+        if (hasDoorFloor)
+        {
+            doorSelectionFloor = doorFloor;
+            doorSelectionFloorEvidenceBaseId = doorBaseId;
+            doorSelectionFloorDetectionPending = false;
+            ResetDoorSelectionChestTarget();
+            AutoTreasureHuntStatus =
+                $"选门：根据最近门 BaseID {doorBaseId} 确认当前为第 {doorSelectionFloor} 层。";
+        }
     }
 
     private void TryHandleDoorSelectionMode()
@@ -5553,6 +5854,37 @@ public sealed class Plugin : IDalamudPlugin
         if (!TreasureMapDefinitions.DoorSelectionInstanceMapIds.Contains(clientState.MapId))
         {
             ExitDoorSelectionMode();
+            return;
+        }
+
+        if (doorSelectionVfxTravelUntil != default)
+        {
+            var vfxTravelStillBlocking =
+                DateTime.UtcNow < doorSelectionVfxTravelUntil ||
+                condition[ConditionFlag.BetweenAreas] ||
+                condition[ConditionFlag.BetweenAreas51] ||
+                condition[ConditionFlag.OccupiedInQuestEvent] ||
+                condition[ConditionFlag.Casting] ||
+                condition[ConditionFlag.BeingMoved];
+            if (vfxTravelStillBlocking)
+            {
+                commandManager.ProcessCommand("/vnav stop");
+                AutoTreasureHuntStatus =
+                    $"选门：正在等待 VFX 光球传送至第 {doorSelectionFloor} 层完成，暂不前往宝箱。";
+                return;
+            }
+
+            doorSelectionVfxTravelUntil = default;
+            AutoTreasureHuntStatus = $"选门：VFX 光球传送已结束，开始寻找第 {doorSelectionFloor} 层宝箱。";
+        }
+
+        TryResolveDoorSelectionFloorWithDefault();
+
+        if (doorSelectionFloor is < 1 or > 5)
+        {
+            commandManager.ProcessCommand("/vnav stop");
+            ResetDoorSelectionChestTarget();
+            AutoTreasureHuntStatus = "选门：当前层数无效，暂停自动流程。";
             return;
         }
 
@@ -5573,7 +5905,11 @@ public sealed class Plugin : IDalamudPlugin
             ResetDoorSelectionChestTarget();
         }
 
-        if (!dutyState.IsDutyStarted)
+        // DutyStarted is only reliable for the initial entry barrier. During
+        // later floor transitions the light-orb movement can temporarily
+        // clear it, but the next floor is already active and must proceed to
+        // its BaseID chest after the VFX travel wait.
+        if (!dutyState.IsDutyStarted && doorSelectionFloor == 1)
         {
             if (doorSelectionChestMoveIssued)
             {
@@ -5598,32 +5934,61 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        // 初始宝箱交互后异步点击“是”。这项点击不参与阶段判断，
-        // 不会因 Yes/No 窗口暂未出现而阻塞后续的战斗状态等待。
+        // 初始宝箱交互后异步点击“是”，窗口出现前仍继续保留当前阶段。
         TryConfirmDoorSelectionChest();
 
-        // A successful Yes/No confirmation marks the initial combat chest as
-        // complete. Do not search or re-interact with its BaseID while waiting
-        // for the encounter to start; the post-combat chest has no BaseID.
         if (doorSelectionInitialChestYesConfirmed)
         {
+            var initialChestStillTargetable = doorSelectionInitialChestEntityId == 0 ||
+                objectTable.Any(gameObject =>
+                    gameObject.EntityId == doorSelectionInitialChestEntityId &&
+                    IsTreasureChest(gameObject) &&
+                    gameObject.IsTargetable);
+
+            if (!initialChestStillTargetable)
+            {
+                doorSelectionInitialChestYesConfirmed = false;
+                doorSelectionInitialChestCompleted = false;
+                doorSelectionPostCombatChestPending = true;
+                doorSelectionPostCombatChestHandled = false;
+                doorSelectionPostCombatChestEmptySince = default;
+                ResetDoorSelectionChestTarget();
+            }
+
             if (condition[ConditionFlag.InCombat])
             {
-                AutoTreasureHuntStatus = "选门：初始宝箱已确认，正在等待战斗结束。";
+                AutoTreasureHuntStatus = initialChestStillTargetable
+                    ? "选门：初始宝箱已确认，等待该宝箱变为不可选中。"
+                    : "选门：初始宝箱已不可选中，等待当前战斗结束。";
                 return;
             }
 
-            if (!doorSelectionCombatObservedAfterYes && !doorSelectionPostCombatChestPending)
+            if (initialChestStillTargetable)
             {
-                AutoTreasureHuntStatus = "选门：初始宝箱已确认，等待进入战斗。";
+                AutoTreasureHuntStatus = "选门：初始宝箱已确认，等待该宝箱变为不可选中。";
                 return;
             }
         }
 
-        // The fifth floor is the terminal floor; do not attempt a sixth door.
-        if (doorSelectionFloor >= 5 && doorSelectionInitialChestCompleted && !doorSelectionPostCombatChestPending)
+        if (doorSelectionPostCombatChestPending && condition[ConditionFlag.InCombat])
         {
-            AutoTreasureHuntStatus = "选门：已记录第五层，等待副本后续结束。";
+            AutoTreasureHuntStatus = "选门：初始宝箱已不可选中，等待当前战斗结束后处理战后宝箱。";
+            return;
+        }
+
+        if (doorSelectionInitialChestCompleted &&
+            !doorSelectionPostCombatChestPending &&
+            doorSelectionPostCombatChestHandled)
+        {
+            if (doorSelectionFloor >= 5)
+            {
+                TryHandleDoorSelectionExit();
+            }
+            else
+            {
+                TryHandleDoorSelectionDoor();
+            }
+
             return;
         }
 
@@ -5634,71 +5999,88 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         var startChestIds = GetDoorSelectionCombatStartChestIds(doorSelectionFloor);
-        var combatChestIds = GetDoorSelectionCombatChestIds(doorSelectionFloor);
-        var chest = doorSelectionPostCombatChestPending
-            ? FindDoorSelectionChest(combatChestIds)
-            : FindDoorSelectionChest(startChestIds);
-        if (chest == null)
+        Dalamud.Game.ClientState.Objects.Types.IGameObject? chest;
+        if (doorSelectionPostCombatChestPending)
         {
-            if (doorSelectionPostCombatChestPending &&
-                !condition[ConditionFlag.InCombat] &&
-                doorSelectionCombatStartedThisFloor)
+            var targetableChests = GetTargetableDoorSelectionChests();
+            if (targetableChests.Length == 0)
             {
-                if (doorSelectionPostCombatChestSearchAt == default)
+                doorSelectionPostCombatChestRetryAt = default;
+                doorSelectionPostCombatChestInteractAcceptedEntities.Clear();
+                if (doorSelectionPostCombatChestEmptySince == default)
                 {
-                    doorSelectionPostCombatChestSearchAt = DateTime.UtcNow;
-                    doorSelectionPostCombatChestSearchDeadline =
-                        doorSelectionPostCombatChestSearchAt.AddSeconds(8);
+                    doorSelectionPostCombatChestEmptySince = DateTime.UtcNow;
                 }
 
-                if (DateTime.UtcNow < doorSelectionPostCombatChestSearchDeadline)
+                if (DateTime.UtcNow - doorSelectionPostCombatChestEmptySince < TimeSpan.FromSeconds(2))
                 {
                     commandManager.ProcessCommand("/vnav stop");
-                    AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层战斗已结束，等待战斗后宝箱出现。";
+                    ResetDoorSelectionChestTarget();
+                    AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层战后阶段，确认场上持续无可选中宝箱。";
                     return;
                 }
 
-                commandManager.ProcessCommand("/vnav stop");
-                ResetDoorSelectionChestTarget();
                 doorSelectionPostCombatChestPending = false;
                 doorSelectionInitialChestCompleted = true;
                 doorSelectionPostCombatChestHandled = true;
                 doorSelectionCombatStartedThisFloor = false;
                 doorSelectionInitialChestYesConfirmed = false;
-                doorSelectionCombatObservedAfterYes = false;
-                doorSelectionPostCombatChestSearchAt = default;
-                doorSelectionPostCombatChestSearchDeadline = default;
-                AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层场上没有可选中宝箱，开始选择下一扇门。";
-                TryHandleDoorSelectionDoor();
+                doorSelectionInitialChestEntityId = 0;
+                doorSelectionPostCombatChestEmptySince = default;
+                ResetDoorSelectionChestTarget();
+                AutoTreasureHuntStatus = doorSelectionFloor >= 5
+                    ? "选门：第五层战后阶段场上无可选中宝箱，等待可选中退出点。"
+                    : $"选门：第 {doorSelectionFloor} 层战后阶段场上无可选中宝箱，将按 UI 设置选择下一扇门。";
                 return;
             }
 
-            if (doorSelectionPostCombatChestPending)
+            doorSelectionPostCombatChestEmptySince = default;
+            chest = FindDoorSelectionChest(
+                [],
+                requireBaseId: false,
+                excludedEntityIds: doorSelectionPostCombatChestInteractAcceptedEntities,
+                prioritizeNoBaseId: true);
+            if (chest == null)
             {
-                // 战斗结束宝箱无 BaseID，交互完成后可能立即从对象表移除。
-                // 找不到该类宝箱即表示本层战斗宝箱阶段已结束，直接进入选门。
                 commandManager.ProcessCommand("/vnav stop");
                 ResetDoorSelectionChestTarget();
-                AutoTreasureHuntStatus = "选门：已切换为战斗后宝箱阶段，等待无 BaseID 的宝箱出现。";
+                if (doorSelectionPostCombatChestRetryAt == default)
+                {
+                    doorSelectionPostCombatChestRetryAt = DateTime.UtcNow.AddSeconds(4);
+                }
+
+                if (DateTime.UtcNow >= doorSelectionPostCombatChestRetryAt)
+                {
+                    foreach (var targetableChest in targetableChests)
+                    {
+                        doorSelectionPostCombatChestInteractAcceptedEntities.Remove(targetableChest.EntityId);
+                    }
+
+                    doorSelectionPostCombatChestRetryAt = default;
+                    AutoTreasureHuntStatus = "选门：战斗后宝箱仍可选中，重新检查并逐个交互。";
+                    return;
+                }
+
+                AutoTreasureHuntStatus = $"选门：已交互 {doorSelectionPostCombatChestInteractAcceptedEntities.Count} 个战斗后宝箱，等待它们变为不可选中。";
                 return;
             }
+        }
+        else
+        {
+            chest = FindDoorSelectionChest(startChestIds, requireBaseId: true);
+        }
 
-        if (doorSelectionInitialChestCompleted &&
-            !doorSelectionPostCombatChestPending &&
-            doorSelectionPostCombatChestHandled)
-            {
-                TryHandleDoorSelectionDoor();
-            }
-            else
-            {
-                commandManager.ProcessCommand("/vnav stop");
-                ResetDoorSelectionChestTarget();
-                AutoTreasureHuntStatus = doorSelectionPostCombatChestPending
-                    ? $"选门：第 {doorSelectionFloor} 层战斗已结束，等待战斗宝箱（BaseID {string.Join(", ", combatChestIds)}；未配置时按名称“宝箱”识别）。"
-                    : $"选门：任务已开始，等待初始宝箱出现（BaseID {string.Join(", ", TreasureMapDefinitions.DoorSelectionInitialChestBaseIds)}）。";
-            }
+        if (chest == null)
+        {
+            commandManager.ProcessCommand("/vnav stop");
+            ResetDoorSelectionChestTarget();
+            AutoTreasureHuntStatus = $"选门：任务已开始，等待初始宝箱出现（BaseID {string.Join(", ", startChestIds)}）。";
             return;
         }
+
+        // After selecting the first actionable chest, keep the default/current
+        // floor stable for the remainder of this floor's combat flow.
+        doorSelectionFloorDetectionPending = false;
 
         if (doorSelectionChestEntityId != chest.EntityId)
         {
@@ -5713,8 +6095,8 @@ public sealed class Plugin : IDalamudPlugin
             var command = FormattableString.Invariant($"/vnav moveto {position.X:F3} {position.Y:F3} {position.Z:F3}");
             doorSelectionChestMoveIssued = commandManager.ProcessCommand(command);
             AutoTreasureHuntStatus = doorSelectionChestMoveIssued
-                ? $"选门：已获取初始宝箱坐标 X {position.X:F3}、Y {position.Y:F3}、Z {position.Z:F3}，正在执行 {command}。"
-                : $"选门：初始宝箱坐标已获取，但命令 {command} 执行失败，正在重试。";
+                ? $"选门：已获取{(doorSelectionPostCombatChestPending ? "战斗后宝箱" : "战斗前宝箱")}坐标 X {position.X:F3}、Y {position.Y:F3}、Z {position.Z:F3}，正在执行 {command}。"
+                : $"选门：{(doorSelectionPostCombatChestPending ? "战斗后宝箱" : "战斗前宝箱")}坐标已获取，但命令 {command} 执行失败，正在重试。";
             return;
         }
 
@@ -5746,7 +6128,9 @@ public sealed class Plugin : IDalamudPlugin
             doorSelectionChestSampleY = playerPosition.Y;
             doorSelectionChestSampleZ = playerPosition.Z;
             doorSelectionChestPositionStableSince = DateTime.UtcNow;
-            AutoTreasureHuntStatus = "选门：已进入初始宝箱交互范围并停止 /vnav，等待角色稳定。";
+            AutoTreasureHuntStatus = doorSelectionPostCombatChestPending
+                ? "选门：已进入战斗后宝箱交互范围并停止 /vnav，等待角色稳定。"
+                : "选门：已进入战斗前宝箱交互范围并停止 /vnav，等待角色稳定。";
             return;
         }
 
@@ -5758,7 +6142,9 @@ public sealed class Plugin : IDalamudPlugin
             doorSelectionChestSampleY = playerPosition.Y;
             doorSelectionChestSampleZ = playerPosition.Z;
             doorSelectionChestPositionStableSince = DateTime.UtcNow;
-            AutoTreasureHuntStatus = "选门：已靠近初始宝箱，等待角色停止移动后交互。";
+            AutoTreasureHuntStatus = doorSelectionPostCombatChestPending
+                ? "选门：已靠近战斗后宝箱，等待角色停止移动后交互。"
+                : "选门：已靠近战斗前宝箱，等待角色停止移动后交互。";
             return;
         }
 
@@ -5779,28 +6165,22 @@ public sealed class Plugin : IDalamudPlugin
 
         if (doorSelectionPostCombatChestPending)
         {
-            doorSelectionPostCombatChestPending = false;
-            doorSelectionInitialChestCompleted = true;
-            doorSelectionPostCombatChestHandled = true;
-            doorSelectionCombatStartedThisFloor = false;
-            doorSelectionInitialChestYesConfirmed = false;
-            doorSelectionCombatObservedAfterYes = false;
-            doorSelectionPostCombatChestSearchAt = default;
-            doorSelectionPostCombatChestSearchDeadline = default;
+            doorSelectionPostCombatChestInteractAcceptedEntities.Add(chest.EntityId);
+            doorSelectionPostCombatChestRetryAt = DateTime.UtcNow.AddSeconds(4);
             ResetDoorSelectionChestTarget();
-            AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层宝箱已完成，等待场上宝箱消失后选择下一扇门。";
+            AutoTreasureHuntStatus = $"选门：已请求交互第 {doorSelectionFloor} 层战斗后宝箱，继续检查场上剩余宝箱。";
             TeleportTestStatus = AutoTreasureHuntStatus;
             return;
         }
 
         confirmDoorSelectionChestPending = true;
         doorSelectionChestConfirmDeadline = DateTime.UtcNow.AddSeconds(10);
-        doorSelectionInitialChestYesConfirmed = true;
+        doorSelectionInitialChestYesConfirmed = false;
+        doorSelectionInitialChestEntityId = chest.EntityId;
         doorSelectionInitialChestCompleted = false;
         doorSelectionPostCombatChestPending = false;
         doorSelectionPostCombatChestHandled = false;
-        doorSelectionCombatObservedAfterYes = false;
-            AutoTreasureHuntStatus = "选门：已与战斗宝箱交互，等待确认窗口。";
+        AutoTreasureHuntStatus = "选门：已与战斗前宝箱交互，等待确认窗口。";
     }
 
     private void TryHandleDoorSelectionDoor()
@@ -5810,11 +6190,31 @@ public sealed class Plugin : IDalamudPlugin
 
         if (doorSelectionDoorAnimationUntil != default)
         {
+            if (confirmDoorSelectionDoorPending)
+            {
+                TryConfirmDoorSelectionDoor();
+                if (confirmDoorSelectionDoorPending || !doorSelectionDoorYesConfirmed)
+                {
+                    return;
+                }
+            }
+
             if (DateTime.UtcNow < doorSelectionDoorAnimationUntil ||
                 condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51] ||
                 condition[ConditionFlag.OccupiedInQuestEvent] || condition[ConditionFlag.Casting])
             {
                 AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层门动画处理中，等待移动恢复。";
+                return;
+            }
+
+            var interactedDoorStillTargetable = doorSelectionInteractedDoorBaseId != 0 &&
+                objectTable.Any(gameObject =>
+                    gameObject.BaseId == doorSelectionInteractedDoorBaseId &&
+                    gameObject.IsTargetable);
+            if (interactedDoorStillTargetable)
+            {
+                AutoTreasureHuntStatus =
+                    $"选门：第 {doorSelectionFloor} 层门仍可选中，等待 BaseID {doorSelectionInteractedDoorBaseId} 变为不可选中。";
                 return;
             }
 
@@ -5845,47 +6245,54 @@ public sealed class Plugin : IDalamudPlugin
                 return;
 
             doorSelectionFloor++;
+            doorSelectionRuntimeChoiceFloor = 0;
+            doorSelectionRuntimeChoice = null;
             doorSelectionDoorEntityId = 0;
+            doorSelectionInteractedDoorBaseId = 0;
             doorSelectionDoorMoveIssued = false;
             doorSelectionDoorAnimationUntil = default;
+            confirmDoorSelectionDoorPending = false;
+            doorSelectionDoorConfirmDeadline = default;
+            doorSelectionDoorYesConfirmed = false;
             doorSelectionVfxMoveIssued = false;
             doorSelectionInitialChestCompleted = false;
             doorSelectionPostCombatChestPending = false;
             doorSelectionPostCombatChestHandled = false;
+            doorSelectionPostCombatChestInteractAcceptedEntities.Clear();
+            doorSelectionPostCombatChestRetryAt = default;
+            doorSelectionPostCombatChestEmptySince = default;
             doorSelectionInitialChestYesConfirmed = false;
-            doorSelectionCombatObservedAfterYes = false;
+            doorSelectionInitialChestEntityId = 0;
             doorSelectionDutyReadyAt = DateTime.UtcNow.AddSeconds(1);
+            doorSelectionVfxTravelUntil = DateTime.UtcNow + DoorSelectionVfxTravelDelay;
             ResetDoorSelectionChestTarget();
-            AutoTreasureHuntStatus = $"选门：已到达 VFX 中心并确认可移动，当前记录为第 {doorSelectionFloor} 层。";
+            ResetDoorSelectionExitState();
+            AutoTreasureHuntStatus = $"选门：已到达 VFX 中心，等待光球传送至第 {doorSelectionFloor} 层完成。";
             return;
         }
 
-        var leftIds = doorSelectionFloor switch
+        TryResolveDoorSelectionFloorWithDefault();
+        if (doorSelectionFloor is < 1 or > 4)
         {
-            1 => TreasureMapDefinitions.DoorSelectionLeftDoorFloor1To2BaseIds,
-            2 => TreasureMapDefinitions.DoorSelectionLeftDoorFloor2To3BaseIds,
-            3 => TreasureMapDefinitions.DoorSelectionLeftDoorFloor3To4BaseIds,
-            4 => TreasureMapDefinitions.DoorSelectionLeftDoorFloor4To5BaseIds,
-            _ => []
-        };
-        var rightIds = doorSelectionFloor switch
-        {
-            1 => TreasureMapDefinitions.DoorSelectionRightDoorFloor1To2BaseIds,
-            2 => TreasureMapDefinitions.DoorSelectionRightDoorFloor2To3BaseIds,
-            3 => TreasureMapDefinitions.DoorSelectionRightDoorFloor3To4BaseIds,
-            4 => TreasureMapDefinitions.DoorSelectionRightDoorFloor4To5BaseIds,
-            _ => []
-        };
-        var selectedDoorIds = GetDoorSelectionChoice(doorSelectionFloor - 1) == DoorSelectionChoice.Left
+            return;
+        }
+        var leftIds = GetDoorSelectionLeftDoorIds(doorSelectionFloor);
+        var rightIds = GetDoorSelectionRightDoorIds(doorSelectionFloor);
+        var activeChoice = GetActiveDoorSelectionChoice(doorSelectionFloor);
+        var selectedDoorIds = activeChoice == DoorSelectionChoice.Left
             ? leftIds
             : rightIds;
         var door = objectTable.FirstOrDefault(o => o.IsTargetable && selectedDoorIds.Contains(o.BaseId));
         if (door == null)
         {
-            var side = GetDoorSelectionChoice(doorSelectionFloor - 1) == DoorSelectionChoice.Left ? "左门" : "右门";
-            AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层尚未检测到已选择的{side} BaseID。";
+            var side = activeChoice == DoorSelectionChoice.Left ? "左门" : "右门";
+            AutoTreasureHuntStatus = doorSelectionFloorDetectionPending
+                ? $"选门：暂未检测到可确认当前层的门 BaseID，暂停门交互；最近候选层为第 {doorSelectionFloor} 层的{side}。"
+                : $"选门：已根据最近门 BaseID {doorSelectionFloorEvidenceBaseId} 确认为第 {doorSelectionFloor} 层，但尚未检测到已选择的{side} BaseID。";
             return;
         }
+
+        doorSelectionFloorDetectionPending = false;
 
         if (doorSelectionDoorEntityId != door.EntityId)
         {
@@ -5899,16 +6306,17 @@ public sealed class Plugin : IDalamudPlugin
             targetManager.Target = door;
             var command = FormattableString.Invariant($"/vnav moveto {door.Position.X:F3} {door.Position.Y:F3} {door.Position.Z:F3}");
             doorSelectionDoorMoveIssued = commandManager.ProcessCommand(command);
-            AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层正在前往{(GetDoorSelectionChoice(doorSelectionFloor - 1) == DoorSelectionChoice.Left ? "左门" : "右门")}。";
+            AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层正在前往{(activeChoice == DoorSelectionChoice.Left ? "左门" : "右门")}。";
             return;
         }
 
-        if (System.Numerics.Vector3.DistanceSquared(playerPosition, door.Position) > 2.5f * 2.5f)
+        if (System.Numerics.Vector3.DistanceSquared(playerPosition, door.Position) >
+            DoorSelectionInteractionDistance * DoorSelectionInteractionDistance)
             return;
 
         commandManager.ProcessCommand("/vnav stop");
         targetManager.Target = door;
-        if (InteractWithGameObject(door) == 0)
+        if (InteractWithGameObject(door, checkLineOfSight: false) == 0)
         {
             doorSelectionDoorMoveIssued = false;
             AutoTreasureHuntStatus = "选门：门交互未被游戏接受，正在重试。";
@@ -5916,9 +6324,268 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         doorSelectionDoorAnimationUntil = DateTime.UtcNow.AddSeconds(2);
+        doorSelectionInteractedDoorBaseId = door.BaseId;
+        confirmDoorSelectionDoorPending = true;
+        doorSelectionDoorConfirmDeadline = DateTime.UtcNow.AddSeconds(10);
+        doorSelectionDoorYesConfirmed = false;
         doorSelectionVfxMoveIssued = false;
-        TrySendChatBoxEntry($"/p <digdoor:896:{door.BaseId}>");
-        AutoTreasureHuntStatus = $"选门：已交互第 {doorSelectionFloor} 层门，等待动画结束。";
+        AutoTreasureHuntStatus = $"选门：已交互第 {doorSelectionFloor} 层门，等待确认窗口并自动点击“是”。";
+    }
+
+    private unsafe void TryConfirmDoorSelectionDoor()
+    {
+        if (!confirmDoorSelectionDoorPending)
+        {
+            return;
+        }
+
+        if (DateTime.UtcNow > doorSelectionDoorConfirmDeadline)
+        {
+            confirmDoorSelectionDoorPending = false;
+            doorSelectionDoorConfirmDeadline = default;
+            doorSelectionDoorYesConfirmed = false;
+            doorSelectionDoorAnimationUntil = default;
+            doorSelectionInteractedDoorBaseId = 0;
+            doorSelectionDoorMoveIssued = false;
+            AutoTreasureHuntStatus = "选门：门确认窗口超时，正在重新交互门。";
+            return;
+        }
+
+        var addon = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
+        if (addon == null || !addon->IsReady)
+        {
+            AutoTreasureHuntStatus = "选门：等待门确认窗口出现。";
+            return;
+        }
+
+        if (addon->FireCallbackInt(0))
+        {
+            confirmDoorSelectionDoorPending = false;
+            doorSelectionDoorConfirmDeadline = default;
+            doorSelectionDoorYesConfirmed = true;
+            AutoTreasureHuntStatus = "选门：已自动点击门确认“是”，等待门变为不可选中。";
+        }
+        else
+        {
+            AutoTreasureHuntStatus = "选门：门确认“是”回调未被接受，继续重试。";
+        }
+    }
+
+    private bool ResumeDoorSelectionPostCombatChestsIfAny()
+    {
+        if (GetTargetableDoorSelectionChests().Length == 0)
+        {
+            return false;
+        }
+
+        commandManager.ProcessCommand("/vnav stop");
+        ResetDoorSelectionExitTarget();
+        doorSelectionInitialChestCompleted = false;
+        doorSelectionPostCombatChestPending = true;
+        doorSelectionPostCombatChestHandled = false;
+        doorSelectionPostCombatChestEmptySince = default;
+        AutoTreasureHuntStatus = "选门：第五层退出前发现仍有可选中宝箱，返回战后宝箱处理。";
+        return true;
+    }
+
+    private void TryHandleDoorSelectionExit()
+    {
+        if (ResumeDoorSelectionPostCombatChestsIfAny())
+        {
+            return;
+        }
+
+        if (confirmDoorSelectionExitPending)
+        {
+            TryConfirmDoorSelectionExit();
+            if (confirmDoorSelectionExitPending || doorSelectionExitConfirmed)
+            {
+                return;
+            }
+        }
+
+        if (doorSelectionExitConfirmed)
+        {
+            if (DateTime.UtcNow < doorSelectionExitMapChangeDeadline)
+            {
+                AutoTreasureHuntStatus = "选门：已确认退出副本，等待离开 G17 地图。";
+                return;
+            }
+
+            doorSelectionExitConfirmed = false;
+            doorSelectionExitMapChangeDeadline = default;
+            ResetDoorSelectionExitTarget();
+            AutoTreasureHuntStatus = "选门：确认后仍未离开副本，重新寻找可选中的退出点。";
+        }
+
+        var exitPoint = objectTable
+            .Where(gameObject => gameObject.IsTargetable && IsDoorSelectionExitPoint(gameObject))
+            .OrderBy(gameObject => objectTable.LocalPlayer == null
+                ? float.PositiveInfinity
+                : System.Numerics.Vector3.DistanceSquared(
+                    objectTable.LocalPlayer.Position,
+                    gameObject.Position))
+            .FirstOrDefault();
+        if (exitPoint == null)
+        {
+            commandManager.ProcessCommand("/vnav stop");
+            ResetDoorSelectionExitTarget();
+            AutoTreasureHuntStatus = $"选门：第五层战后宝箱已清理，等待可选中的副本退出点（优先 BaseID {RouletteExitBaseId}）。";
+            return;
+        }
+
+        if (doorSelectionExitEntityId != exitPoint.EntityId)
+        {
+            ResetDoorSelectionExitTarget();
+            doorSelectionExitEntityId = exitPoint.EntityId;
+        }
+
+        if (!doorSelectionExitMoveIssued)
+        {
+            targetManager.Target = exitPoint;
+            var command = FormattableString.Invariant(
+                $"/vnav moveto {exitPoint.Position.X:F3} {exitPoint.Position.Y:F3} {exitPoint.Position.Z:F3}");
+            doorSelectionExitMoveIssued = commandManager.ProcessCommand(command);
+            AutoTreasureHuntStatus = doorSelectionExitMoveIssued
+                ? "选门：第五层结束，正在前往可选中的副本退出点。"
+                : "选门：退出点寻路命令失败，正在重试。";
+            return;
+        }
+
+        var localPlayer = objectTable.LocalPlayer;
+        if (localPlayer == null)
+        {
+            return;
+        }
+
+        if (System.Numerics.Vector3.DistanceSquared(localPlayer.Position, exitPoint.Position) > 2.5f * 2.5f)
+        {
+            doorSelectionExitPositionSampleValid = false;
+            AutoTreasureHuntStatus = "选门：正在接近第五层副本退出点。";
+            return;
+        }
+
+        commandManager.ProcessCommand("/vnav stop");
+        const float movementTolerance = 0.05f;
+        var playerPosition = localPlayer.Position;
+        if (!doorSelectionExitPositionSampleValid ||
+            MathF.Abs(playerPosition.X - doorSelectionExitSampleX) > movementTolerance ||
+            MathF.Abs(playerPosition.Y - doorSelectionExitSampleY) > movementTolerance ||
+            MathF.Abs(playerPosition.Z - doorSelectionExitSampleZ) > movementTolerance)
+        {
+            doorSelectionExitPositionSampleValid = true;
+            doorSelectionExitSampleX = playerPosition.X;
+            doorSelectionExitSampleY = playerPosition.Y;
+            doorSelectionExitSampleZ = playerPosition.Z;
+            doorSelectionExitPositionStableSince = DateTime.UtcNow;
+            AutoTreasureHuntStatus = "选门：已到达退出点交互范围，等待角色稳定。";
+            return;
+        }
+
+        if (DateTime.UtcNow - doorSelectionExitPositionStableSince < TimeSpan.FromSeconds(1))
+        {
+            return;
+        }
+
+        if (ResumeDoorSelectionPostCombatChestsIfAny())
+        {
+            return;
+        }
+
+        var targetableExitPoint = objectTable.FirstOrDefault(gameObject =>
+            gameObject.EntityId == exitPoint.EntityId &&
+            gameObject.IsTargetable &&
+            IsDoorSelectionExitPoint(gameObject));
+        if (targetableExitPoint == null)
+        {
+            commandManager.ProcessCommand("/vnav stop");
+            ResetDoorSelectionExitTarget();
+            AutoTreasureHuntStatus = "选门：退出点当前不可选中，等待其重新可选后再交互。";
+            return;
+        }
+
+        targetManager.Target = targetableExitPoint;
+        if (InteractWithGameObject(targetableExitPoint) == 0)
+        {
+            ResetDoorSelectionExitTarget();
+            AutoTreasureHuntStatus = "选门：退出点交互未被游戏接受，正在重试。";
+            return;
+        }
+
+        confirmDoorSelectionExitPending = true;
+        doorSelectionExitConfirmDeadline = DateTime.UtcNow.AddSeconds(10);
+        doorSelectionExitMoveIssued = false;
+        doorSelectionExitPositionSampleValid = false;
+        AutoTreasureHuntStatus = "选门：已交互第五层退出点，等待 Yes/No 并自动确认。";
+    }
+
+    private unsafe void TryConfirmDoorSelectionExit()
+    {
+        if (!confirmDoorSelectionExitPending)
+        {
+            return;
+        }
+
+        if (DateTime.UtcNow > doorSelectionExitConfirmDeadline)
+        {
+            confirmDoorSelectionExitPending = false;
+            doorSelectionExitConfirmDeadline = default;
+            ResetDoorSelectionExitTarget();
+            AutoTreasureHuntStatus = "选门：退出点确认窗口超时，重新寻找并交互退出点。";
+            return;
+        }
+
+        var addon = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
+        if (addon == null || !addon->IsReady || !addon->IsVisible)
+        {
+            return;
+        }
+
+        if (addon->FireCallbackInt(0))
+        {
+            confirmDoorSelectionExitPending = false;
+            doorSelectionExitConfirmDeadline = default;
+            doorSelectionExitConfirmed = true;
+            doorSelectionExitMapChangeDeadline = DateTime.UtcNow.AddSeconds(15);
+            AutoTreasureHuntStatus = "选门：已确认第五层退出副本，等待地图切换。";
+            TeleportTestStatus = AutoTreasureHuntStatus;
+        }
+    }
+
+    private static bool IsDoorSelectionExitPoint(
+        Dalamud.Game.ClientState.Objects.Types.IGameObject gameObject)
+    {
+        if (gameObject.BaseId == RouletteExitBaseId)
+        {
+            return true;
+        }
+
+        if (!string.Equals(gameObject.ObjectKind.ToString(), "EventObj", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var name = gameObject.Name.TextValue;
+        return name.Contains("退出", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("出口", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("exit", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void ResetDoorSelectionExitTarget()
+    {
+        doorSelectionExitEntityId = 0;
+        doorSelectionExitMoveIssued = false;
+        doorSelectionExitPositionSampleValid = false;
+        doorSelectionExitPositionStableSince = default;
+    }
+
+    private void ResetDoorSelectionExitState()
+    {
+        ResetDoorSelectionExitTarget();
+        confirmDoorSelectionExitPending = false;
+        doorSelectionExitConfirmDeadline = default;
+        doorSelectionExitConfirmed = false;
+        doorSelectionExitMapChangeDeadline = default;
     }
 
     private bool TryHandleDoorSelectionCombatState()
@@ -5933,8 +6600,14 @@ public sealed class Plugin : IDalamudPlugin
         if (inCombat)
         {
             doorSelectionCombatStartedThisFloor = true;
-            if (doorSelectionInitialChestYesConfirmed)
-                doorSelectionCombatObservedAfterYes = true;
+            if (doorSelectionPostCombatChestPending)
+            {
+                doorSelectionPostCombatChestInteractAcceptedEntities.Clear();
+                doorSelectionPostCombatChestRetryAt = default;
+                doorSelectionPostCombatChestEmptySince = default;
+                ResetDoorSelectionChestTarget();
+            }
+
             commandManager.ProcessCommand("/bmrai on");
             AutoTreasureHuntStatus = "选门：已进入战斗并执行 /bmrai on。";
         }
@@ -5945,9 +6618,6 @@ public sealed class Plugin : IDalamudPlugin
             {
                 doorSelectionInitialChestCompleted = false;
                 doorSelectionPostCombatChestPending = true;
-                doorSelectionPostCombatChestSearchAt = DateTime.UtcNow;
-                doorSelectionPostCombatChestSearchDeadline =
-                    doorSelectionPostCombatChestSearchAt.AddSeconds(8);
                 ResetDoorSelectionChestTarget();
             }
             AutoTreasureHuntStatus = "选门：已脱离战斗并执行 /bmrai off。";
@@ -5967,6 +6637,9 @@ public sealed class Plugin : IDalamudPlugin
         if (DateTime.UtcNow > doorSelectionChestConfirmDeadline)
         {
             confirmDoorSelectionChestPending = false;
+            doorSelectionInitialChestYesConfirmed = false;
+            doorSelectionInitialChestEntityId = 0;
+            doorSelectionChestConfirmDeadline = default;
             ResetDoorSelectionChestTarget();
             AutoTreasureHuntStatus = "选门：等待初始宝箱确认窗口超时，正在重新前往并交互宝箱。";
             return;
@@ -5981,8 +6654,10 @@ public sealed class Plugin : IDalamudPlugin
         if (addon->FireCallbackInt(0))
         {
             confirmDoorSelectionChestPending = false;
+            doorSelectionInitialChestYesConfirmed = true;
+            doorSelectionChestConfirmDeadline = default;
             commandManager.ProcessCommand("/vnav stop");
-            AutoTreasureHuntStatus = "选门：已出现并确认初始宝箱 Yes/No，等待战斗后无 BaseID 宝箱。";
+            AutoTreasureHuntStatus = "选门：已确认初始宝箱 Yes/No，等待该宝箱变为不可选中。";
             TeleportTestStatus = AutoTreasureHuntStatus;
         }
         else
@@ -6001,17 +6676,28 @@ public sealed class Plugin : IDalamudPlugin
     private void ResetDoorSelectionChestState(bool resetCompleted)
     {
         ResetDoorSelectionChestTarget();
+        doorSelectionRuntimeChoiceFloor = 0;
+        doorSelectionRuntimeChoice = null;
+        doorSelectionVfxTravelUntil = default;
+        confirmDoorSelectionDoorPending = false;
+        doorSelectionDoorConfirmDeadline = default;
+        doorSelectionDoorYesConfirmed = false;
         confirmDoorSelectionChestPending = false;
         doorSelectionChestConfirmDeadline = default;
         doorSelectionDutyReadyAt = default;
         doorSelectionPostCombatChestPending = false;
+        doorSelectionPostCombatChestInteractAcceptedEntities.Clear();
+        doorSelectionPostCombatChestRetryAt = default;
+        doorSelectionPostCombatChestEmptySince = default;
+        doorSelectionInitialChestYesConfirmed = false;
+        doorSelectionInitialChestEntityId = 0;
+        ResetDoorSelectionExitState();
         if (resetCompleted)
         {
             doorSelectionInitialChestCompleted = false;
             doorSelectionPostCombatChestHandled = false;
             doorSelectionCombatStartedThisFloor = false;
             doorSelectionInitialChestYesConfirmed = false;
-            doorSelectionCombatObservedAfterYes = false;
         }
     }
 
@@ -6578,7 +7264,9 @@ public sealed class Plugin : IDalamudPlugin
         rouletteExitDelayStarted = false;
     }
 
-    private unsafe ulong InteractWithGameObject(Dalamud.Game.ClientState.Objects.Types.IGameObject gameObject)
+    private unsafe ulong InteractWithGameObject(
+        Dalamud.Game.ClientState.Objects.Types.IGameObject gameObject,
+        bool checkLineOfSight = true)
     {
         var targetSystem = TargetSystem.Instance();
         var nativeObject = (GameObject*)gameObject.Address;
@@ -6588,7 +7276,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         targetSystem->SetHardTarget(nativeObject);
-        return targetSystem->InteractWithObject(nativeObject, checkLineOfSight: true);
+        return targetSystem->InteractWithObject(nativeObject, checkLineOfSight);
     }
 
     public void UseTreasureMapForTest()

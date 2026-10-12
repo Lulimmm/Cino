@@ -436,9 +436,21 @@ public sealed class MainWindow
         {
             plugin.TestNavigateToDoorSelectionPortalVfx();
         }
+        ContinueTestButtonRow();
+        if (ImGui.Button("检测当前选门层数"))
+        {
+            plugin.TestDetectDoorSelectionFloor();
+        }
+        ContinueTestButtonRow();
+        if (ImGui.Button("检测最近门发光消息"))
+        {
+            plugin.TestDetectDoorSelectionGlowingDoor();
+        }
         ImGui.TextWrapped(plugin.InteractableObjectScanStatus);
         ImGui.TextWrapped(plugin.EffectCenterTestStatus);
         ImGui.TextWrapped(plugin.FieldMarkerTestStatus);
+        ImGui.TextWrapped(plugin.DoorSelectionFloorDetectionTestStatus);
+        ImGui.TextWrapped(plugin.DoorSelectionGlowingDoorTestStatus);
 
         ImGui.SetNextItemWidth(180);
         ImGui.InputText("目标 BaseID###NavigationBaseId", ref navigationBaseIdInput, 16);
