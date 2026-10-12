@@ -64,33 +64,41 @@ public sealed class MainWindow
         ImGui.Separator();
         ImGui.Spacing();
 
-        if (!plugin.IsCredentialValidated)
+        if (plugin.IsCredentialValidated)
         {
-            DrawCredentialPage();
-            ImGui.End();
-            return;
-        }
-
-        ImGui.TextDisabled($"已验证：{plugin.CredentialRoleName}");
-        ImGui.SameLine();
-        if (ImGui.SmallButton("退出验证"))
-        {
-            plugin.ClearCredential();
-            credentialInput = plugin.HasSavedCredential ? RememberedCredentialMask : string.Empty;
-            credentialStatus = string.Empty;
+            ImGui.TextDisabled($"已验证：{plugin.CredentialRoleName}");
+            ImGui.SameLine();
+            if (ImGui.SmallButton("退出验证"))
+            {
+                plugin.ClearCredential();
+                credentialInput = plugin.HasSavedCredential ? RememberedCredentialMask : string.Empty;
+                credentialStatus = string.Empty;
+            }
         }
 
         if (ImGui.BeginTabBar("AutoTreasureHuntTabs"))
         {
-            if (ImGui.BeginTabItem("自动挖宝"))
+            if (plugin.IsCredentialValidated && ImGui.BeginTabItem("自动挖宝"))
             {
                 DrawAutoTreasureHuntPage();
+                ImGui.EndTabItem();
+            }
+
+            if (!plugin.IsCredentialValidated && ImGui.BeginTabItem("凭证验证"))
+            {
+                DrawCredentialPage();
                 ImGui.EndTabItem();
             }
 
             if (plugin.HasDeveloperCredential && ImGui.BeginTabItem("测试"))
             {
                 DrawTestPage();
+                ImGui.EndTabItem();
+            }
+
+            if (ImGui.BeginTabItem("IC死宫"))
+            {
+                DrawDeepDungeonPage();
                 ImGui.EndTabItem();
             }
 
@@ -297,6 +305,36 @@ public sealed class MainWindow
                 : "BossModReborn";
             pluginInterface.OpenPluginInstallerTo(searchText: missingPlugin);
         }
+    }
+
+    private void DrawDeepDungeonPage()
+    {
+        ImGui.Text("IC死宫");
+        ImGui.Separator();
+
+        ImGui.Text("当前层数：");
+        ImGui.SameLine();
+        ImGui.Text(plugin.DeepDungeonCurrentFloor > 0
+            ? plugin.DeepDungeonCurrentFloor.ToString(CultureInfo.InvariantCulture)
+            : "未读取");
+        ImGui.TextWrapped(plugin.DeepDungeonMovementStatus);
+
+        var enabled = plugin.DeepDungeonMovementEnabled;
+        var adjustment = plugin.DeepDungeonMovementAdjustment;
+
+        var changed = ImGui.Checkbox("启用深层迷宫高度调整", ref enabled);
+        ImGui.SetNextItemWidth(220f);
+        changed |= ImGui.InputFloat("高度调整值", ref adjustment, 0.1f, 1f, "%.2f");
+        adjustment = float.IsFinite(adjustment) ? Math.Clamp(adjustment, -10f, 10f) : 0f;
+        if (ImGui.Button("高度设为 -7"))
+        {
+            adjustment = -7f;
+            changed = true;
+        }
+
+        ImGui.TextDisabled("调整值范围：-10 至 10；仅在有效深层迷宫层数已读取时生效。");
+        if (changed)
+            plugin.SetDeepDungeonMovementSettings(enabled, adjustment);
     }
 
     private void DrawTestPage()

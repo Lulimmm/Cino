@@ -35,6 +35,10 @@ public sealed class PluginConfiguration : IPluginConfiguration
 
     public int AnimationLockOverrideMilliseconds { get; set; } = 550;
 
+    public bool DeepDungeonMovementEnabled { get; set; }
+
+    public float DeepDungeonMovementAdjustment { get; set; }
+
 }
 
 public enum CredentialRole

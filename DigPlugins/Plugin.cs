@@ -158,6 +158,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly GlobetrotterTreasureMapCore globetrotterTreasureMapCore;
     private readonly VfxEffectCenterProbe vfxEffectCenterProbe;
     private readonly AnimationLockController animationLockController;
+    private readonly DeepDungeonMovementController deepDungeonMovementController;
     private CredentialRole sessionCredentialRole;
     private bool validationServerCheckInProgress;
     private DateTime validationServerLastCheckedAt;
@@ -265,6 +266,8 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime doorSelectionChestConfirmDeadline;
     private bool doorSelectionInitialChestCompleted;
     private bool doorSelectionPostCombatChestPending;
+    private DateTime doorSelectionPostCombatChestSearchAt;
+    private DateTime doorSelectionPostCombatChestSearchDeadline;
     private DateTime doorSelectionDutyReadyAt;
     private bool doorSelectionWasInCombat;
     private bool doorSelectionCombatStartedThisFloor;
@@ -460,6 +463,16 @@ public sealed class Plugin : IDalamudPlugin
             log,
             () => configuration.AnimationLockOverrideEnabled && HasDeveloperCredential,
             () => configuration.AnimationLockOverrideMilliseconds);
+
+        deepDungeonMovementController = new DeepDungeonMovementController(
+            framework,
+            condition,
+            clientState,
+            interop,
+            sigScanner,
+            log,
+            () => configuration.DeepDungeonMovementEnabled,
+            () => configuration.DeepDungeonMovementAdjustment);
 
         coordinateApplier = new CoordinateApplier(objectTable, SaveConfiguration);
         openMarketAnywhere = new OpenMarketAnywhere(framework, gameGui, log, interop, marketBoard, dataManager, textureProvider);
@@ -709,6 +722,23 @@ public sealed class Plugin : IDalamudPlugin
 
     public int AnimationLockOverrideMilliseconds => configuration.AnimationLockOverrideMilliseconds;
 
+    public bool DeepDungeonMovementEnabled => configuration.DeepDungeonMovementEnabled;
+
+    public float DeepDungeonMovementAdjustment => configuration.DeepDungeonMovementAdjustment;
+
+    public int DeepDungeonCurrentFloor => deepDungeonMovementController.CurrentFloor;
+
+    public string DeepDungeonMovementStatus => deepDungeonMovementController.Status;
+
+    public void SetDeepDungeonMovementSettings(bool enabled, float adjustment)
+    {
+        configuration.DeepDungeonMovementEnabled = enabled;
+        configuration.DeepDungeonMovementAdjustment = float.IsFinite(adjustment)
+            ? Math.Clamp(adjustment, -10f, 10f)
+            : 0f;
+        SaveConfiguration();
+    }
+
     public void SetAnimationLockOverride(bool enabled, int milliseconds)
     {
         configuration.AnimationLockOverrideEnabled = enabled;
@@ -868,6 +898,7 @@ public sealed class Plugin : IDalamudPlugin
         chatGui.ChatMessage -= OnChatMessage;
         openMarketAnywhere.Dispose();
         animationLockController.Dispose();
+        deepDungeonMovementController.Dispose();
         gameGui.HoveredItemChanged -= globetrotterTreasureMapCore.OnHover;
         globetrotterTreasureMapCore.Dispose();
         commandManager.RemoveHandler("/lltp");
@@ -5435,6 +5466,54 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+    private static IReadOnlyList<uint> GetDoorSelectionCombatStartChestIds(int floor)
+    {
+        return floor switch
+        {
+            1 => TreasureMapDefinitions.DoorSelectionCombatStartChestFloor1BaseIds,
+            2 => TreasureMapDefinitions.DoorSelectionCombatStartChestFloor2BaseIds,
+            3 => TreasureMapDefinitions.DoorSelectionCombatStartChestFloor3BaseIds,
+            4 => TreasureMapDefinitions.DoorSelectionCombatStartChestFloor4BaseIds,
+            5 => TreasureMapDefinitions.DoorSelectionCombatStartChestFloor5BaseIds,
+            _ => [],
+        };
+    }
+
+    private static IReadOnlyList<uint> GetDoorSelectionCombatChestIds(int floor)
+    {
+        return floor switch
+        {
+            1 => TreasureMapDefinitions.DoorSelectionCombatChestFloor1BaseIds,
+            2 => TreasureMapDefinitions.DoorSelectionCombatChestFloor2BaseIds,
+            3 => TreasureMapDefinitions.DoorSelectionCombatChestFloor3BaseIds,
+            4 => TreasureMapDefinitions.DoorSelectionCombatChestFloor4BaseIds,
+            5 => TreasureMapDefinitions.DoorSelectionCombatChestFloor5BaseIds,
+            _ => [],
+        };
+    }
+
+    private Dalamud.Game.ClientState.Objects.Types.IGameObject? FindDoorSelectionChest(
+        IReadOnlyList<uint> preferredBaseIds)
+    {
+        var targetableChests = objectTable.Where(gameObject =>
+            IsTreasureChest(gameObject) &&
+            gameObject.IsTargetable);
+
+        if (preferredBaseIds.Count > 0)
+        {
+            var configuredChest = targetableChests.FirstOrDefault(gameObject =>
+                preferredBaseIds.Contains(gameObject.BaseId));
+            if (configuredChest != null)
+            {
+                return configuredChest;
+            }
+        }
+
+        // Some rooms expose no stable pre-combat BaseID. In that case the
+        // current room's targetable treasure coffer is the only reliable cue.
+        return targetableChests.FirstOrDefault();
+    }
+
     private void TryHandleDoorSelectionMode()
     {
         if (!TreasureMapDefinitions.DoorSelectionInstanceMapIds.Contains(clientState.MapId))
@@ -5514,27 +5593,37 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        var combatChestIds = doorSelectionFloor switch
+        if (confirmDoorSelectionChestPending)
         {
-            1 => TreasureMapDefinitions.DoorSelectionCombatStartChestFloor1BaseIds,
-            2 => TreasureMapDefinitions.DoorSelectionCombatStartChestFloor2BaseIds,
-            3 => TreasureMapDefinitions.DoorSelectionCombatStartChestFloor3BaseIds,
-            4 => TreasureMapDefinitions.DoorSelectionCombatStartChestFloor4BaseIds,
-            5 => TreasureMapDefinitions.DoorSelectionCombatStartChestFloor5BaseIds,
-            _ => [],
-        };
+            AutoTreasureHuntStatus = "选门：等待当前宝箱的 Yes/No 确认窗口。";
+            return;
+        }
+
+        var startChestIds = GetDoorSelectionCombatStartChestIds(doorSelectionFloor);
+        var combatChestIds = GetDoorSelectionCombatChestIds(doorSelectionFloor);
         var chest = doorSelectionPostCombatChestPending
-            ? objectTable.FirstOrDefault(gameObject =>
-                IsTreasureChest(gameObject) &&
-                gameObject.IsTargetable)
-            : objectTable.FirstOrDefault(gameObject =>
-                combatChestIds.Contains(gameObject.BaseId));
+            ? FindDoorSelectionChest(combatChestIds)
+            : FindDoorSelectionChest(startChestIds);
         if (chest == null)
         {
             if (doorSelectionPostCombatChestPending &&
                 !condition[ConditionFlag.InCombat] &&
                 doorSelectionCombatStartedThisFloor)
             {
+                if (doorSelectionPostCombatChestSearchAt == default)
+                {
+                    doorSelectionPostCombatChestSearchAt = DateTime.UtcNow;
+                    doorSelectionPostCombatChestSearchDeadline =
+                        doorSelectionPostCombatChestSearchAt.AddSeconds(8);
+                }
+
+                if (DateTime.UtcNow < doorSelectionPostCombatChestSearchDeadline)
+                {
+                    commandManager.ProcessCommand("/vnav stop");
+                    AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层战斗已结束，等待战斗后宝箱出现。";
+                    return;
+                }
+
                 commandManager.ProcessCommand("/vnav stop");
                 ResetDoorSelectionChestTarget();
                 doorSelectionPostCombatChestPending = false;
@@ -5543,6 +5632,8 @@ public sealed class Plugin : IDalamudPlugin
                 doorSelectionCombatStartedThisFloor = false;
                 doorSelectionInitialChestYesConfirmed = false;
                 doorSelectionCombatObservedAfterYes = false;
+                doorSelectionPostCombatChestSearchAt = default;
+                doorSelectionPostCombatChestSearchDeadline = default;
                 AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层场上没有可选中宝箱，开始选择下一扇门。";
                 TryHandleDoorSelectionDoor();
                 return;
@@ -5660,6 +5751,8 @@ public sealed class Plugin : IDalamudPlugin
             doorSelectionCombatStartedThisFloor = false;
             doorSelectionInitialChestYesConfirmed = false;
             doorSelectionCombatObservedAfterYes = false;
+            doorSelectionPostCombatChestSearchAt = default;
+            doorSelectionPostCombatChestSearchDeadline = default;
             ResetDoorSelectionChestTarget();
             AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层宝箱已完成，等待场上宝箱消失后选择下一扇门。";
             TeleportTestStatus = AutoTreasureHuntStatus;
@@ -5818,6 +5911,9 @@ public sealed class Plugin : IDalamudPlugin
             {
                 doorSelectionInitialChestCompleted = false;
                 doorSelectionPostCombatChestPending = true;
+                doorSelectionPostCombatChestSearchAt = DateTime.UtcNow;
+                doorSelectionPostCombatChestSearchDeadline =
+                    doorSelectionPostCombatChestSearchAt.AddSeconds(8);
                 ResetDoorSelectionChestTarget();
             }
             AutoTreasureHuntStatus = "选门：已脱离战斗并执行 /bmrai off。";
