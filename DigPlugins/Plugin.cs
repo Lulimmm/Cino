@@ -159,6 +159,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly VfxEffectCenterProbe vfxEffectCenterProbe;
     private readonly AnimationLockController animationLockController;
     private readonly DeepDungeonMovementController deepDungeonMovementController;
+    private readonly DeepDungeonSpeedController deepDungeonSpeedController;
     private CredentialRole sessionCredentialRole;
     private bool validationServerCheckInProgress;
     private DateTime validationServerLastCheckedAt;
@@ -474,6 +475,17 @@ public sealed class Plugin : IDalamudPlugin
             () => configuration.DeepDungeonMovementEnabled,
             () => configuration.DeepDungeonMovementAdjustment);
 
+        deepDungeonSpeedController = new DeepDungeonSpeedController(
+            framework,
+            condition,
+            objectTable,
+            interop,
+            sigScanner,
+            log,
+            () => configuration.DeepDungeonSpeedEnabled,
+            () => configuration.DeepDungeonSpeedAddition,
+            () => configuration.DeepDungeonMaxAcceleration);
+
         coordinateApplier = new CoordinateApplier(objectTable, SaveConfiguration);
         openMarketAnywhere = new OpenMarketAnywhere(framework, gameGui, log, interop, marketBoard, dataManager, textureProvider);
         globetrotterTreasureMapCore = new GlobetrotterTreasureMapCore(
@@ -730,6 +742,27 @@ public sealed class Plugin : IDalamudPlugin
 
     public string DeepDungeonMovementStatus => deepDungeonMovementController.Status;
 
+    public bool DeepDungeonSpeedEnabled => configuration.DeepDungeonSpeedEnabled;
+
+    public float DeepDungeonSpeedAddition => configuration.DeepDungeonSpeedAddition;
+
+    public bool DeepDungeonMaxAcceleration => configuration.DeepDungeonMaxAcceleration;
+
+    public string DeepDungeonSpeedStatus => deepDungeonSpeedController.Status;
+
+    public void SetDeepDungeonSpeedSettings(
+        bool enabled,
+        float addition,
+        bool maxAcceleration)
+    {
+        configuration.DeepDungeonSpeedEnabled = enabled;
+        configuration.DeepDungeonSpeedAddition = float.IsFinite(addition)
+            ? Math.Clamp(addition, 0f, 5f)
+            : 0f;
+        configuration.DeepDungeonMaxAcceleration = maxAcceleration;
+        SaveConfiguration();
+    }
+
     public void SetDeepDungeonMovementSettings(bool enabled, float adjustment)
     {
         configuration.DeepDungeonMovementEnabled = enabled;
@@ -899,6 +932,7 @@ public sealed class Plugin : IDalamudPlugin
         openMarketAnywhere.Dispose();
         animationLockController.Dispose();
         deepDungeonMovementController.Dispose();
+        deepDungeonSpeedController.Dispose();
         gameGui.HoveredItemChanged -= globetrotterTreasureMapCore.OnHover;
         globetrotterTreasureMapCore.Dispose();
         commandManager.RemoveHandler("/lltp");

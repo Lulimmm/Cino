@@ -335,6 +335,32 @@ public sealed class MainWindow
         ImGui.TextDisabled("调整值范围：-10 至 10；仅在有效深层迷宫层数已读取时生效。");
         if (changed)
             plugin.SetDeepDungeonMovementSettings(enabled, adjustment);
+
+        ImGui.Separator();
+        ImGui.Text("深层迷宫移速");
+        var speedEnabled = plugin.DeepDungeonSpeedEnabled;
+        var speedAddition = plugin.DeepDungeonSpeedAddition;
+        var maxAcceleration = plugin.DeepDungeonMaxAcceleration;
+        var speedChanged = ImGui.Checkbox("启用移速调整", ref speedEnabled);
+        ImGui.SetNextItemWidth(220f);
+        speedChanged |= ImGui.SliderFloat("移速增加", ref speedAddition, 0f, 5f, "%.2f");
+        if (ImGui.Button("移速增加 +0.01"))
+        {
+            speedAddition = Math.Clamp(speedAddition + 0.01f, 0f, 5f);
+            speedChanged = true;
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("移速减少 -0.01"))
+        {
+            speedAddition = Math.Clamp(speedAddition - 0.01f, 0f, 5f);
+            speedChanged = true;
+        }
+        speedChanged |= ImGui.Checkbox("最大加速度", ref maxAcceleration);
+        ImGui.TextWrapped(plugin.DeepDungeonSpeedStatus);
+        ImGui.TextDisabled("移速签名已内置；只有在深层迷宫内且未受限制状态影响时生效。");
+
+        if (speedChanged)
+            plugin.SetDeepDungeonSpeedSettings(speedEnabled, speedAddition, maxAcceleration);
     }
 
     private void DrawTestPage()

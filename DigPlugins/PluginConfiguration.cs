@@ -39,6 +39,12 @@ public sealed class PluginConfiguration : IPluginConfiguration
 
     public float DeepDungeonMovementAdjustment { get; set; }
 
+    public bool DeepDungeonSpeedEnabled { get; set; }
+
+    public float DeepDungeonSpeedAddition { get; set; }
+
+    public bool DeepDungeonMaxAcceleration { get; set; }
+
 }
 
 public enum CredentialRole
