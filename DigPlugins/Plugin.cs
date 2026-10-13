@@ -965,6 +965,7 @@ public sealed class Plugin : IDalamudPlugin
         UnloadOptimizedInteraction();
         pluginInterface.UiBuilder.OpenMainUi -= mainWindow.Open;
         pluginInterface.UiBuilder.Draw -= mainWindow.Draw;
+        mainWindow.Dispose();
         pluginInterface.ActivePluginsChanged -= OnActivePluginsChanged;
         framework.Update -= OnFrameworkUpdate;
         clientState.MapIdChanged -= OnMapIdChanged;
