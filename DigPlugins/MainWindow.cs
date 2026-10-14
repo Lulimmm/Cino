@@ -36,6 +36,7 @@ public sealed class MainWindow
     private readonly IDalamudPluginInterface pluginInterface;
     private readonly IDataManager dataManager;
     private readonly ITextureProvider textureProvider;
+    private readonly ISharedImmediateTexture? sealTexture;
     private readonly Dictionary<uint, ISharedImmediateTexture?> mapIconCache = new();
     private static readonly int[] AemeathSpriteFrameCounts = { 6, 8, 8, 4, 5, 8, 6, 6, 6 };
     private static readonly int[] AemeathSpecialActionStartRows = { 1, 3, 4, 5, 6, 7, 8 };
@@ -87,6 +88,13 @@ public sealed class MainWindow
         this.pluginInterface = pluginInterface;
         this.dataManager = dataManager;
         this.textureProvider = textureProvider;
+
+        var sealPath = Path.Combine(
+            pluginInterface.AssemblyLocation.DirectoryName ?? AppContext.BaseDirectory,
+            "Resources",
+            "Hb-transparent.png");
+        if (File.Exists(sealPath))
+            sealTexture = textureProvider.GetFromFile(sealPath);
     }
 
     public void Open()
@@ -166,6 +174,7 @@ public sealed class MainWindow
         {
             DrawActivePage();
             DrawAemeathScrollRail("PageScroll");
+            DrawSealOnPage();
         }
         ImGui.EndChild();
 
@@ -597,7 +606,8 @@ public sealed class MainWindow
             var x = screenMin.X + screenSize.X * ScreenGlyphStreamPositions[column];
             var phase = (float)((time * ScreenGlyphStreamSpeeds[column] * rowSpacing
                 + column * rowSpacing * 1.73d) % streamCycle);
-            for (var row = -1; row < streamRows; row++)
+            // Cover the full wrapped cycle so glyphs pass continuously from the bottom back to the top.
+            for (var row = -streamRows; row < streamRows; row++)
             {
                 var y = screenMin.Y + row * rowSpacing + phase - rowSpacing;
                 if (y < screenMin.Y || y + glyphHeight > screenMax.Y)
@@ -687,8 +697,6 @@ public sealed class MainWindow
             return;
         }
 
-        var drawList = ImGui.GetWindowDrawList();
-        var position = ImGui.GetWindowPos();
         var windowSize = ImGui.GetWindowSize();
         ImGui.SetCursorPos(new Vector2(Math.Max(420f, windowSize.X - 252f), 10f));
         DrawStatusPill("系统", plugin.IsAutoTreasureHuntEnabled ? AemeathCyan : AemeathGold,
@@ -747,6 +755,20 @@ public sealed class MainWindow
             plugin.IsCredentialValidated ? plugin.CredentialRoleName : "LOCKED");
         ImGui.EndChild();
 #endif
+    }
+
+    private void DrawSealOnPage()
+    {
+        if (sealTexture == null || !sealTexture.TryGetWrap(out var seal, out _) || seal == null)
+            return;
+
+        var pagePosition = ImGui.GetWindowPos();
+        var pageSize = ImGui.GetWindowSize();
+        var sealWidth = Math.Clamp(pageSize.X * 0.22f, 126f, 188f);
+        var sealHeight = sealWidth * 781f / 1115f;
+        var sealBottomRight = pagePosition + pageSize - new Vector2(26f, 16f);
+        var sealTopLeft = sealBottomRight - new Vector2(sealWidth, sealHeight);
+        ImGui.GetWindowDrawList().AddImage(seal.Handle, sealTopLeft, sealBottomRight);
     }
 
     private void DrawSidebar()
