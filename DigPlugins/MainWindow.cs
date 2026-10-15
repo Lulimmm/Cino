@@ -4,8 +4,12 @@ using Dalamud.Plugin;
 using Dalamud.Interface.Textures;
 using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Plugin.Services;
+using Dalamud.Interface;
+using Dalamud.Interface.ManagedFontAtlas;
 using Lumina.Excel.Sheets;
 using System.Globalization;
+using System.Drawing;
+using System.Drawing.Imaging;
 
 namespace AutoTreasureHunt;
 
@@ -36,8 +40,21 @@ public sealed class MainWindow
     private readonly IDalamudPluginInterface pluginInterface;
     private readonly IDataManager dataManager;
     private readonly ITextureProvider textureProvider;
-    private readonly ISharedImmediateTexture? sealTexture;
     private readonly Dictionary<uint, ISharedImmediateTexture?> mapIconCache = new();
+    private readonly object fleetTextureLock = new();
+    private readonly CancellationTokenSource fleetTextureLoadCancellation = new();
+    private IDalamudTextureWrap[][]? fleetCharacterActions;
+    private IDalamudTextureWrap[]? fleetSealFrames;
+    private Task? fleetTextureLoadTask;
+    private bool fleetTextureLoadFailed;
+    private bool fleetTextureDisposed;
+    private int fleetCharacterFrame;
+    private int fleetCharacterAction;
+    private int fleetCharacterActionDirection = 1;
+    private double fleetCharacterNextSpecialAt;
+    private int fleetSealFrame;
+    private double fleetCharacterNextFrameAt;
+    private double fleetSealNextFrameAt;
     private static readonly int[] AemeathSpriteFrameCounts = { 6, 8, 8, 4, 5, 8, 6, 6, 6 };
     private static readonly int[] AemeathSpecialActionStartRows = { 1, 3, 4, 5, 6, 7, 8 };
     private readonly object aemeathSpriteLock = new();
@@ -77,6 +94,17 @@ public sealed class MainWindow
     private int mapSupplementMaxUnitPriceObserved;
     private MainPage activePage = MainPage.Automation;
     private bool treasureMapSelectorOpen;
+    private readonly IFontAtlas fleetFontAtlas;
+    private readonly IFontHandle fleetFontHandle;
+    private static readonly ushort[] FleetChineseGlyphRanges =
+    {
+        0x3000, 0x303F,
+        0x3400, 0x4DBF,
+        0x4E00, 0x9FFF,
+        0xF900, 0xFAFF,
+        0xFF00, 0xFFEF,
+        0
+    };
 
     public MainWindow(
         Plugin plugin,
@@ -89,12 +117,30 @@ public sealed class MainWindow
         this.dataManager = dataManager;
         this.textureProvider = textureProvider;
 
-        var sealPath = Path.Combine(
+        var fontPath = Path.Combine(
             pluginInterface.AssemblyLocation.DirectoryName ?? AppContext.BaseDirectory,
             "Resources",
-            "Hb-transparent.png");
-        if (File.Exists(sealPath))
-            sealTexture = textureProvider.GetFromFile(sealPath);
+            "FleetSnowfluff",
+            "UranusCN.ttf");
+        fleetFontAtlas = pluginInterface.UiBuilder.CreateFontAtlas(
+            FontAtlasAutoRebuildMode.Async,
+            isGlobalScaled: true,
+            debugName: "DigPlugins Chinese Font");
+        fleetFontHandle = fleetFontAtlas.NewDelegateFontHandle(toolkit => toolkit.OnPreBuild(preBuild =>
+        {
+            var defaultFont = preBuild.AddDalamudDefaultFont(17f);
+            var config = new SafeFontConfig
+            {
+                SizePx = 17f,
+                GlyphRanges = FleetChineseGlyphRanges,
+                MergeFont = defaultFont,
+                PixelSnapH = true,
+                OversampleH = 2,
+                OversampleV = 1,
+            };
+            preBuild.AddFontFromFile(fontPath, in config);
+            preBuild.Font = defaultFont;
+        }));
     }
 
     public void Open()
@@ -110,6 +156,10 @@ public sealed class MainWindow
             return;
         }
 
+        IDisposable? fontScope = null;
+        if (fleetFontHandle.Available)
+            fontScope = fleetFontHandle.Push();
+
         ImGui.SetNextWindowSize(new Vector2(940, 680), ImGuiCond.FirstUseEver);
         ImGui.SetNextWindowSizeConstraints(new Vector2(760, 520), new Vector2(1500, 1100));
         PushAemeathStyle();
@@ -118,6 +168,7 @@ public sealed class MainWindow
         {
             ImGui.End();
             PopAemeathStyle();
+            fontScope?.Dispose();
             return;
         }
 
@@ -159,7 +210,7 @@ public sealed class MainWindow
             ImDrawFlags.RoundCornersAll,
             1f);
 
-        DrawAemeathSprite(bodyDrawList, bodyTopLeft, bodyBottom, sidebarWidth);
+        DrawFleetCharacter(bodyDrawList, bodyTopLeft, bodyBottom, sidebarWidth);
 
         if (ImGui.BeginChild("AemeathSidebar", new Vector2(sidebarWidth, bodyHeight), false,
                 ImGuiWindowFlags.NoScrollbar))
@@ -180,6 +231,7 @@ public sealed class MainWindow
 
         ImGui.End();
         PopAemeathStyle();
+        fontScope?.Dispose();
     }
 
     public void Dispose()
@@ -204,6 +256,206 @@ public sealed class MainWindow
         }
 
         aemeathSpriteLoadCancellation.Dispose();
+
+        IDalamudTextureWrap[][]? characterActions;
+        IDalamudTextureWrap[]? sealFrames;
+        lock (fleetTextureLock)
+        {
+            fleetTextureDisposed = true;
+            characterActions = fleetCharacterActions;
+            sealFrames = fleetSealFrames;
+            fleetCharacterActions = null;
+            fleetSealFrames = null;
+        }
+
+        fleetTextureLoadCancellation.Cancel();
+        foreach (var action in characterActions ?? Array.Empty<IDalamudTextureWrap[]>())
+        foreach (var texture in action)
+            texture.Dispose();
+        foreach (var texture in sealFrames ?? Array.Empty<IDalamudTextureWrap>())
+            texture.Dispose();
+        fleetTextureLoadCancellation.Dispose();
+
+        fleetFontHandle.Dispose();
+        fleetFontAtlas.Dispose();
+    }
+
+    private void EnsureFleetTextureLoad()
+    {
+        if (fleetCharacterActions is not null || fleetTextureLoadFailed || fleetTextureDisposed)
+            return;
+
+        fleetTextureLoadTask ??= LoadFleetTexturesAsync(fleetTextureLoadCancellation.Token);
+        if (!fleetTextureLoadTask.IsCompleted)
+            return;
+
+        if (!fleetTextureLoadTask.IsCompletedSuccessfully)
+        {
+            _ = fleetTextureLoadTask.Exception;
+            fleetTextureLoadFailed = true;
+        }
+    }
+
+    private void DrawFleetCharacter(ImDrawListPtr drawList, Vector2 bodyTopLeft, float bodyBottom, float sidebarWidth)
+    {
+        EnsureFleetTextureLoad();
+        var actions = fleetCharacterActions;
+        if (actions is null || actions.Length == 0 || actions[0].Length == 0)
+            return;
+
+        var now = ImGui.GetTime();
+        if (fleetCharacterNextSpecialAt <= 0d)
+            fleetCharacterNextSpecialAt = now + Random.Shared.Next(10, 22);
+
+        if (fleetCharacterAction == 0 && now >= fleetCharacterNextSpecialAt && actions.Length > 1)
+        {
+            fleetCharacterAction = Random.Shared.Next(1, actions.Length);
+            fleetCharacterFrame = 0;
+            fleetCharacterActionDirection = 1;
+            fleetCharacterNextFrameAt = now + 0.12d;
+        }
+
+        var frames = actions[fleetCharacterAction];
+        if (frames.Length == 0)
+        {
+            fleetCharacterAction = 0;
+            frames = actions[0];
+        }
+
+        var frameDelay = fleetCharacterAction == 0 ? 0.12d : 0.20d;
+        if (fleetCharacterNextFrameAt <= 0d)
+            fleetCharacterNextFrameAt = now + frameDelay;
+        while (now >= fleetCharacterNextFrameAt)
+        {
+            if (fleetCharacterAction == 0)
+            {
+                fleetCharacterFrame = (fleetCharacterFrame + 1) % frames.Length;
+            }
+            // A special GIF is one complete left/right-style gesture: play forward,
+            // then traverse the same frames backwards before returning to idle.
+            else if (fleetCharacterActionDirection > 0)
+            {
+                if (fleetCharacterFrame < frames.Length - 1)
+                {
+                    fleetCharacterFrame++;
+                }
+                else
+                {
+                    fleetCharacterActionDirection = -1;
+                    if (frames.Length > 1)
+                        fleetCharacterFrame--;
+                }
+            }
+            else if (fleetCharacterFrame > 0)
+            {
+                fleetCharacterFrame--;
+            }
+            else
+            {
+                fleetCharacterAction = 0;
+                fleetCharacterActionDirection = 1;
+                fleetCharacterNextSpecialAt = now + Random.Shared.Next(10, 22);
+                frames = actions[0];
+            }
+
+            fleetCharacterNextFrameAt += frameDelay;
+        }
+
+        const float spriteSize = 176f;
+        var topLeft = new Vector2(
+            bodyTopLeft.X + (sidebarWidth - spriteSize) * 0.5f,
+            bodyBottom - spriteSize - 14f);
+        drawList.AddImage(frames[Math.Min(fleetCharacterFrame, frames.Length - 1)].Handle,
+            topLeft, topLeft + new Vector2(spriteSize, spriteSize));
+    }
+
+    private async Task LoadFleetTexturesAsync(CancellationToken cancellationToken)
+    {
+        var resourceDirectory = Path.Combine(
+            pluginInterface.AssemblyLocation.DirectoryName ?? AppContext.BaseDirectory,
+            "Resources",
+            "FleetSnowfluff");
+        var sealPath = Path.Combine(resourceDirectory, "pixel-seal-cute.gif");
+        var characterActions = new List<IDalamudTextureWrap[]>();
+        var sealTextures = new List<IDalamudTextureWrap>();
+        try
+        {
+            var characterFiles = new[]
+            {
+                "pixel-seal-idle.gif",
+                "pixel-seal-hu.gif",
+                "pixel-seal-happy.gif",
+                "pixel-seal-happy-2.gif",
+                "pixel-seal-jump.gif",
+                "pixel-seal-jump-2.gif",
+                "pixel-seal-fly.gif",
+                "pixel-seal-cool.gif",
+            };
+            var sealFrames = await DecodeGifFramesAsync(sealPath, cancellationToken);
+            for (var actionIndex = 0; actionIndex < characterFiles.Length; actionIndex++)
+            {
+                var path = Path.Combine(resourceDirectory, characterFiles[actionIndex]);
+                var frames = await DecodeGifFramesAsync(path, cancellationToken);
+                var textures = new List<IDalamudTextureWrap>(frames.Count);
+                for (var frameIndex = 0; frameIndex < frames.Count; frameIndex++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    textures.Add(await textureProvider.CreateFromImageAsync(
+                        frames[frameIndex], $"fleet-character-{actionIndex:D2}-{frameIndex:D2}", cancellationToken));
+                }
+                characterActions.Add(textures.ToArray());
+            }
+            for (var index = 0; index < sealFrames.Count; index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                sealTextures.Add(await textureProvider.CreateFromImageAsync(
+                    sealFrames[index], $"fleet-seal-{index:D2}", cancellationToken));
+            }
+
+            lock (fleetTextureLock)
+            {
+                if (fleetTextureDisposed)
+                    throw new OperationCanceledException(cancellationToken);
+
+                fleetCharacterActions = characterActions.ToArray();
+                fleetSealFrames = sealTextures.ToArray();
+            }
+        }
+        catch
+        {
+            foreach (var action in characterActions)
+            foreach (var texture in action)
+                texture.Dispose();
+            foreach (var texture in sealTextures)
+                texture.Dispose();
+            throw;
+        }
+    }
+
+    private static Task<List<byte[]>> DecodeGifFramesAsync(string path, CancellationToken cancellationToken)
+    {
+        return Task.Run(() =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            using var gif = Image.FromFile(path);
+            var dimension = new FrameDimension(gif.FrameDimensionsList[0]);
+            var frames = new List<byte[]>(gif.GetFrameCount(dimension));
+            for (var index = 0; index < gif.GetFrameCount(dimension); index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                gif.SelectActiveFrame(dimension, index);
+                using var frame = new Bitmap(gif.Width, gif.Height, PixelFormat.Format32bppArgb);
+                using (var graphics = Graphics.FromImage(frame))
+                {
+                    graphics.Clear(Color.Transparent);
+                    graphics.DrawImageUnscaled(gif, 0, 0);
+                }
+                using var stream = new MemoryStream();
+                frame.Save(stream, ImageFormat.Png);
+                frames.Add(stream.ToArray());
+            }
+            return frames;
+        }, cancellationToken);
     }
 
     private void DrawAemeathSprite(ImDrawListPtr drawList, Vector2 bodyTopLeft, float bodyBottom, float sidebarWidth)
@@ -759,16 +1011,27 @@ public sealed class MainWindow
 
     private void DrawSealOnPage()
     {
-        if (sealTexture == null || !sealTexture.TryGetWrap(out var seal, out _) || seal == null)
+        EnsureFleetTextureLoad();
+        var frames = fleetSealFrames;
+        if (frames is null || frames.Length == 0)
             return;
+
+        var now = ImGui.GetTime();
+        if (fleetSealNextFrameAt <= 0d)
+            fleetSealNextFrameAt = now + 0.18d;
+        while (now >= fleetSealNextFrameAt)
+        {
+            fleetSealFrame = (fleetSealFrame + 1) % frames.Length;
+            fleetSealNextFrameAt += 0.18d;
+        }
 
         var pagePosition = ImGui.GetWindowPos();
         var pageSize = ImGui.GetWindowSize();
         var sealWidth = Math.Clamp(pageSize.X * 0.22f, 126f, 188f);
-        var sealHeight = sealWidth * 781f / 1115f;
+        var sealHeight = sealWidth * 250f / 300f;
         var sealBottomRight = pagePosition + pageSize - new Vector2(26f, 16f);
         var sealTopLeft = sealBottomRight - new Vector2(sealWidth, sealHeight);
-        ImGui.GetWindowDrawList().AddImage(seal.Handle, sealTopLeft, sealBottomRight);
+        ImGui.GetWindowDrawList().AddImage(frames[fleetSealFrame].Handle, sealTopLeft, sealBottomRight);
     }
 
     private void DrawSidebar()

@@ -10,10 +10,10 @@
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>AutoTreasureHunt</AssemblyName>
     <RootNamespace>AutoTreasureHunt</RootNamespace>
-    <Version>1.0.7.3</Version>
-    <AssemblyVersion>1.0.7.3</AssemblyVersion>
-    <FileVersion>1.0.7.3</FileVersion>
-    <InformationalVersion>1.0.7.3</InformationalVersion>
+    <Version>1.0.7.4</Version>
+    <AssemblyVersion>1.0.7.4</AssemblyVersion>
+    <FileVersion>1.0.7.4</FileVersion>
+    <InformationalVersion>1.0.7.4</InformationalVersion>
     <AssemblyTitle>海豹助手</AssemblyTitle>
     <Product>海豹助手</Product>
     <DalamudLibPath Condition="'$(DalamudLibPath)' == ''">C:\Users\admin\.nuget\packages\aeassist.net\1.2.15\lib\net10.0</DalamudLibPath>
@@ -52,8 +52,16 @@
     <Compile Remove="tmp_decoder\**\*.cs" />
     <None Include="AutoTreasureHunt.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Resources\dny.jpg" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="Resources\Hb-transparent.png" CopyToOutputDirectory="PreserveNewest" />
-    <None Update="Resources\AemeathSprites\*.png" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Resources\FleetSnowfluff\pixel-seal-idle.gif" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Resources\FleetSnowfluff\pixel-seal-hu.gif" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Resources\FleetSnowfluff\pixel-seal-happy.gif" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Resources\FleetSnowfluff\pixel-seal-happy-2.gif" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Resources\FleetSnowfluff\pixel-seal-jump.gif" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Resources\FleetSnowfluff\pixel-seal-jump-2.gif" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Resources\FleetSnowfluff\pixel-seal-fly.gif" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Resources\FleetSnowfluff\pixel-seal-cool.gif" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Resources\FleetSnowfluff\pixel-seal-cute.gif" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Resources\FleetSnowfluff\UranusCN.ttf" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
