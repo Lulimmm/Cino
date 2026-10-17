@@ -979,10 +979,8 @@ public sealed class MainWindow
             isOpen = true;
         var openCenter = windowPosition + new Vector2(width - 25f, 13f);
         var openColor = ImGui.GetColorU32(new Vector4(0.35f, 0.95f, 1f, 0.92f));
-        drawList.AddRect(openCenter - new Vector2(6f, 5f), openCenter + new Vector2(5f, 6f), openColor, 2f,
-            ImDrawFlags.None, 1.5f);
-        drawList.AddLine(openCenter + new Vector2(-1f, 2f), openCenter + new Vector2(7f, -6f), openColor, 1.5f);
-        drawList.AddLine(openCenter + new Vector2(2f, -6f), openCenter + new Vector2(7f, -6f), openColor, 1.5f);
+        drawList.AddRect(openCenter - new Vector2(6f, 6f), openCenter + new Vector2(6f, 6f),
+            openColor, 2f, ImDrawFlags.RoundCornersAll, 1.8f);
         if (ImGui.IsItemHovered())
         {
             ImGui.BeginTooltip();
