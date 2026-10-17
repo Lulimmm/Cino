@@ -3517,6 +3517,9 @@ public sealed class MainWindow
         private const long SpectrumUpdateIntervalMs = 33;
         private const float HighFrequencyTiltDecibels = 18f;
         private const float DynamicFloorRatio = 0.16f;
+        private const int TailPropagationStartBand = 24;
+        private const float TailPropagationDecay = 0.985f;
+        private const float TailPropagationRatio = 0.24f;
         private readonly ISampleProvider source;
         private readonly int channels;
         private readonly float[] frame = new float[FftSize];
@@ -3615,6 +3618,18 @@ public sealed class MainWindow
                     DynamicFloorRatio;
                 for (var band = 0; band < BandCount; band++)
                     rawLevels[band] = Math.Max(rawLevels[band], dynamicFloor);
+
+                // Lossy music files often contain almost no energy in the last
+                // few FFT bins. Carry a decaying portion of the audible spectrum
+                // into that tail so it follows the music instead of becoming a
+                // perfectly flat minimum-height segment.
+                var propagatedLevel = 0f;
+                for (var band = 0; band < BandCount; band++)
+                {
+                    propagatedLevel = Math.Max(rawLevels[band], propagatedLevel * TailPropagationDecay);
+                    if (band >= TailPropagationStartBand)
+                        rawLevels[band] = Math.Max(rawLevels[band], propagatedLevel * TailPropagationRatio);
+                }
             }
         }
     }
