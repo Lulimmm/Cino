@@ -551,6 +551,10 @@ public sealed class Plugin : IDalamudPlugin
         {
             HelpMessage = "打开当前任务地图并设置红旗",
         });
+        commandManager.AddHandler("/hb", new CommandInfo(OnHbCommand)
+        {
+            HelpMessage = "打开海豹助手窗口。",
+        });
         _ = this.framework.RunOnTick(
             InitializeRuntimeState,
             delay: RandomizedDelay(1));
@@ -982,6 +986,12 @@ public sealed class Plugin : IDalamudPlugin
         commandManager.RemoveHandler("/lltp");
         commandManager.RemoveHandler("/llmarket");
         commandManager.RemoveHandler("/tmap");
+        commandManager.RemoveHandler("/hb");
+    }
+
+    private void OnHbCommand(string command, string arguments)
+    {
+        mainWindow.Open();
     }
 
     private void OnTmapCommand(string command, string arguments)

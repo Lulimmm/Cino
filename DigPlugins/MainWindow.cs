@@ -52,7 +52,8 @@ public sealed class MainWindow
     private readonly IFramework framework;
     private readonly IGameConfig gameConfig;
     private readonly ISharedImmediateTexture? fleetPanelBackground;
-    private readonly ISharedImmediateTexture? nowPlayingCoverTexture;
+    private readonly ISharedImmediateTexture? nowPlayingFallbackCoverTexture;
+    private ISharedImmediateTexture? nowPlayingCoverTexture;
     private readonly Dictionary<uint, ISharedImmediateTexture?> mapIconCache = new();
     private readonly object fleetTextureLock = new();
     private readonly CancellationTokenSource fleetTextureLoadCancellation = new();
@@ -98,7 +99,7 @@ public sealed class MainWindow
         "101101101101111", "101101101101010", "101101111111101", "101101010101101",
         "101101010010010", "111001010100111"
     };
-    private bool isOpen = true;
+    private bool isOpen;
     private string credentialInput = string.Empty;
     private string credentialStatus = string.Empty;
     private bool credentialValidationInProgress;
@@ -122,7 +123,7 @@ public sealed class MainWindow
     private EventHandler<StoppedEventArgs>? nowPlayingStoppedHandler;
     private CancellationTokenSource? nowPlayingLoadCancellation;
     private bool gameBgmSuppressed;
-    private uint savedGameBgmVolume;
+    private uint savedGameBgmEnabled;
     private static readonly string[] NowPlayingTrackFiles =
     {
         "我与你 - 鸣潮先约电台、auburn.mp3",
@@ -211,7 +212,10 @@ public sealed class MainWindow
             "FleetSnowfluff",
             "now-playing-cover.jpg");
         if (File.Exists(nowPlayingCoverPath))
-            nowPlayingCoverTexture = textureProvider.GetFromFile(nowPlayingCoverPath);
+        {
+            nowPlayingFallbackCoverTexture = textureProvider.GetFromFile(nowPlayingCoverPath);
+            nowPlayingCoverTexture = nowPlayingFallbackCoverTexture;
+        }
 
         var fontPath = Path.Combine(
             pluginInterface.AssemblyLocation.DirectoryName ?? AppContext.BaseDirectory,
@@ -1362,6 +1366,7 @@ public sealed class MainWindow
         var cancellation = new CancellationTokenSource();
         nowPlayingLoadCancellation = cancellation;
         DisposeNowPlayingPlayback();
+        nowPlayingCoverTexture = nowPlayingFallbackCoverTexture;
         nowPlayingIsPlaying = false;
         nowPlayingIsLoading = true;
         nowPlayingStatus = File.Exists(GetNowPlayingCachePath(NowPlayingTrackFiles[nowPlayingTrackIndex]))
@@ -1378,6 +1383,9 @@ public sealed class MainWindow
             var fileName = NowPlayingTrackFiles[trackIndex];
             var url = "https://fleet-snowfluff.makuraly.xyz/music/" + Uri.EscapeDataString(fileName);
             var cachePath = await CacheNowPlayingTrackAsync(url, fileName, cancellationToken);
+            var coverPath = await Task.Run(
+                () => CacheNowPlayingCover(cachePath, fileName),
+                cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             var playback = await Task.Run(() =>
             {
@@ -1404,6 +1412,9 @@ public sealed class MainWindow
                     return;
                 }
 
+                nowPlayingCoverTexture = coverPath is not null
+                    ? textureProvider.GetFromFile(coverPath)
+                    : nowPlayingFallbackCoverTexture;
                 nowPlayingReader = playback.Reader;
                 nowPlayingOutput = playback.Output;
                 nowPlayingOutput.Volume = nowPlayingVolume;
@@ -1496,6 +1507,178 @@ public sealed class MainWindow
         return Path.Combine(pluginDirectory, "Resources", "FleetSnowfluff", "AudioCache", fileName);
     }
 
+    private string? CacheNowPlayingCover(string audioPath, string audioFileName)
+    {
+        var cacheDirectory = Path.GetDirectoryName(audioPath)!;
+        var coverBasePath = Path.Combine(cacheDirectory, Path.GetFileNameWithoutExtension(audioFileName) + ".cover");
+        foreach (var extension in new[] { ".jpg", ".png", ".gif" })
+        {
+            var existingPath = coverBasePath + extension;
+            if (File.Exists(existingPath) && new FileInfo(existingPath).Length > 0)
+                return existingPath;
+        }
+
+        try
+        {
+            var audioData = File.ReadAllBytes(audioPath);
+            var coverData = ExtractId3Cover(audioData);
+            if (coverData is null)
+                return null;
+
+            var extension = coverData.Value.Extension;
+            var coverPath = coverBasePath + extension;
+            var temporaryPath = coverPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllBytes(temporaryPath, coverData.Value.Data);
+                File.Move(temporaryPath, coverPath, true);
+                return coverPath;
+            }
+            finally
+            {
+                if (File.Exists(temporaryPath))
+                    File.Delete(temporaryPath);
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static (byte[] Data, string Extension)? ExtractId3Cover(byte[] audioData)
+    {
+        if (audioData.Length < 10 || audioData[0] != (byte)'I' ||
+            audioData[1] != (byte)'D' || audioData[2] != (byte)'3')
+            return null;
+
+        var majorVersion = audioData[3];
+        if (majorVersion is not (3 or 4) || (audioData[5] & 0x80) != 0)
+            return null;
+
+        var tagSize = ReadSynchsafeInt(audioData, 6);
+        var tagEnd = Math.Min(audioData.Length, 10 + tagSize);
+        var offset = 10;
+        if ((audioData[5] & 0x40) != 0)
+        {
+            if (offset + 4 > tagEnd)
+                return null;
+
+            var extendedHeaderSize = majorVersion == 4
+                ? ReadSynchsafeInt(audioData, offset)
+                : checked((int)ReadBigEndianUInt32(audioData, offset));
+            offset += majorVersion == 4 ? extendedHeaderSize : 4 + extendedHeaderSize;
+        }
+
+        while (offset + 10 <= tagEnd)
+        {
+            if (audioData[offset] == 0)
+                break;
+
+            var frameId = System.Text.Encoding.ASCII.GetString(audioData, offset, 4);
+            var frameSize = majorVersion == 4
+                ? ReadSynchsafeInt(audioData, offset + 4)
+                : checked((int)ReadBigEndianUInt32(audioData, offset + 4));
+            var formatFlags = audioData[offset + 9];
+            var frameDataStart = offset + 10;
+            var frameEnd = frameDataStart + frameSize;
+            if (frameSize <= 0 || frameEnd > tagEnd)
+                break;
+
+            if (frameId == "APIC")
+            {
+                var prefixLength = 0;
+                if (majorVersion == 3)
+                {
+                    if ((formatFlags & 0xC0) != 0)
+                        goto NextFrame;
+                    if ((formatFlags & 0x20) != 0)
+                        prefixLength = 1;
+                }
+                else
+                {
+                    if ((formatFlags & 0x0C) != 0 || (formatFlags & 0x02) != 0)
+                        goto NextFrame;
+                    if ((formatFlags & 0x40) != 0)
+                        prefixLength++;
+                    if ((formatFlags & 0x01) != 0)
+                        prefixLength += 4;
+                }
+
+                var pictureStart = FindId3PictureStart(audioData, frameDataStart + prefixLength, frameEnd);
+                if (pictureStart >= 0)
+                {
+                    var extension = GetImageExtension(audioData, pictureStart, frameEnd - pictureStart);
+                    if (extension is not null)
+                        return (audioData[pictureStart..frameEnd], extension);
+                }
+            }
+
+        NextFrame:
+            offset = frameEnd;
+        }
+
+        return null;
+    }
+
+    private static int FindId3PictureStart(byte[] data, int offset, int frameEnd)
+    {
+        if (offset >= frameEnd)
+            return -1;
+
+        var encoding = data[offset++];
+        if (encoding > 3)
+            return -1;
+
+        var mimeEnd = Array.IndexOf(data, (byte)0, offset, frameEnd - offset);
+        if (mimeEnd < 0 || mimeEnd + 1 >= frameEnd)
+            return -1;
+
+        var descriptionStart = mimeEnd + 2;
+        if (encoding is 1 or 2)
+        {
+            for (var index = descriptionStart; index + 1 < frameEnd; index += 2)
+            {
+                if (data[index] == 0 && data[index + 1] == 0)
+                    return index + 2;
+            }
+        }
+        else
+        {
+            var descriptionEnd = Array.IndexOf(data, (byte)0, descriptionStart, frameEnd - descriptionStart);
+            if (descriptionEnd >= 0)
+                return descriptionEnd + 1;
+        }
+
+        return -1;
+    }
+
+    private static string? GetImageExtension(byte[] data, int offset, int length)
+    {
+        if (length >= 3 && data[offset] == 0xFF && data[offset + 1] == 0xD8 && data[offset + 2] == 0xFF)
+            return ".jpg";
+        if (length >= 8 && data[offset] == 0x89 && data[offset + 1] == 0x50 &&
+            data[offset + 2] == 0x4E && data[offset + 3] == 0x47 && data[offset + 4] == 0x0D &&
+            data[offset + 5] == 0x0A && data[offset + 6] == 0x1A && data[offset + 7] == 0x0A)
+            return ".png";
+        if (length >= 6 && data[offset] == (byte)'G' && data[offset + 1] == (byte)'I' &&
+            data[offset + 2] == (byte)'F')
+            return ".gif";
+        return null;
+    }
+
+    private static int ReadSynchsafeInt(byte[] data, int offset) =>
+        (data[offset] & 0x7F) << 21 |
+        (data[offset + 1] & 0x7F) << 14 |
+        (data[offset + 2] & 0x7F) << 7 |
+        (data[offset + 3] & 0x7F);
+
+    private static uint ReadBigEndianUInt32(byte[] data, int offset) =>
+        (uint)data[offset] << 24 |
+        (uint)data[offset + 1] << 16 |
+        (uint)data[offset + 2] << 8 |
+        data[offset + 3];
+
     private void HandleNowPlayingStopped(int requestId, StoppedEventArgs args)
     {
         if (nowPlayingDisposed || requestId != nowPlayingRequestId)
@@ -1579,11 +1762,11 @@ public sealed class MainWindow
 
         try
         {
-            if (!gameConfig.TryGet(SystemConfigOption.SoundBgm, out uint currentVolume))
+            if (!gameConfig.TryGet(SystemConfigOption.IsSndBgm, out uint currentEnabled))
                 return;
 
-            savedGameBgmVolume = currentVolume;
-            gameConfig.Set(SystemConfigOption.SoundBgm, 0u);
+            savedGameBgmEnabled = currentEnabled;
+            gameConfig.Set(SystemConfigOption.IsSndBgm, 0u);
             gameBgmSuppressed = true;
         }
         catch
@@ -1598,7 +1781,7 @@ public sealed class MainWindow
 
         try
         {
-            gameConfig.Set(SystemConfigOption.SoundBgm, savedGameBgmVolume);
+            gameConfig.Set(SystemConfigOption.IsSndBgm, savedGameBgmEnabled);
             gameBgmSuppressed = false;
         }
         catch
