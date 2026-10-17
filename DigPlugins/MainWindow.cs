@@ -3515,6 +3515,8 @@ public sealed class MainWindow
         private const float MaxDecibels = -30f;
         private const float SmoothingTimeConstant = 0.85f;
         private const long SpectrumUpdateIntervalMs = 33;
+        private const float HighFrequencyTiltDecibels = 18f;
+        private const float DynamicFloorRatio = 0.16f;
         private readonly ISampleProvider source;
         private readonly int channels;
         private readonly float[] frame = new float[FftSize];
@@ -3584,6 +3586,7 @@ public sealed class MainWindow
 
             lock (levelsLock)
             {
+                var energySquared = 0f;
                 for (var band = 0; band < BandCount; band++)
                 {
                     // Match AnalyserNode.frequencyBinCount: all 64 bins, including
@@ -3593,10 +3596,25 @@ public sealed class MainWindow
                     // NAudio's FFT is unnormalised. Web Audio reports the equivalent
                     // amplitude after normalising by the FFT length.
                     var normalizedMagnitude = magnitude * (2f / FftSize);
+                    energySquared += normalizedMagnitude * normalizedMagnitude;
                     var decibels = 20f * MathF.Log10(Math.Max(0.0000001f, normalizedMagnitude));
+                    // Native FFT output usually has a much narrower high-frequency
+                    // range than the browser analyser. Apply a gentle spectral tilt
+                    // so upper bars retain the same visible response as the webpage.
+                    decibels += band / (float)(BandCount - 1) * HighFrequencyTiltDecibels;
                     rawLevels[band] = Math.Clamp(
                         (decibels - MinDecibels) / (MaxDecibels - MinDecibels), 0f, 1f);
                 }
+
+                // Keep a small amount of whole-frame movement in quiet upper bins;
+                // this prevents the tail from becoming a permanently flat baseline.
+                var rms = MathF.Sqrt(energySquared / BandCount);
+                var rmsDecibels = 20f * MathF.Log10(Math.Max(0.0000001f, rms));
+                var dynamicFloor = Math.Clamp(
+                    (rmsDecibels - MinDecibels) / (MaxDecibels - MinDecibels), 0f, 1f) *
+                    DynamicFloorRatio;
+                for (var band = 0; band < BandCount; band++)
+                    rawLevels[band] = Math.Max(rawLevels[band], dynamicFloor);
             }
         }
     }
