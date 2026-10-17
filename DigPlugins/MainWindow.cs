@@ -1005,17 +1005,23 @@ public sealed class MainWindow
         const float barGap = 2f;
         var barCount = Math.Max(1, (int)MathF.Floor(spectrumWidth / (barWidth + barGap)));
         var spectrumHeight = spectrumMax.Y - spectrumMin.Y;
+        var spectrumCenter = (barCount - 1) * 0.5f;
         for (var i = 0; i < barCount; i++)
         {
-            var normalizedIndex = i / (float)Math.Max(1, barCount - 1);
-            var fftIndex = (int)MathF.Round(normalizedIndex * (floatingSpectrumLevels.Length - 1));
+            // Put the low-frequency start of the analyser in the middle and
+            // expand toward both edges, so both sides share the same responsive
+            // high-frequency tail instead of leaving the left side as a separate
+            // static-looking block.
+            var distanceFromCenter = MathF.Abs(i - spectrumCenter) /
+                Math.Max(1f, spectrumCenter);
+            var fftIndex = (int)MathF.Round(distanceFromCenter * (floatingSpectrumLevels.Length - 1));
             var fftLevel = floatingSpectrumLevels[Math.Clamp(fftIndex, 0, floatingSpectrumLevels.Length - 1)];
             var barHeight = nowPlayingIsPlaying
                 ? Math.Max(6f, fftLevel * spectrumHeight * 0.80f)
                 : Math.Max(4f, spectrumHeight *
-                    (0.12f + (MathF.Sin(normalizedIndex * MathF.PI * 2.6f) * 0.35f +
-                        MathF.Cos(normalizedIndex * MathF.PI * 7.2f) * 0.12f) * 0.18f +
-                        normalizedIndex * 0.04f));
+                    (0.12f + (MathF.Sin(distanceFromCenter * MathF.PI * 2.6f) * 0.35f +
+                        MathF.Cos(distanceFromCenter * MathF.PI * 7.2f) * 0.12f) * 0.18f +
+                        distanceFromCenter * 0.04f));
             var x = spectrumMin.X + i * (barWidth + barGap);
             var barBottom = spectrumMax.Y - 3f;
             var barTop = barBottom - barHeight;
