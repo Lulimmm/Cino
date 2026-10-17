@@ -1006,6 +1006,10 @@ public sealed class MainWindow
         var barCount = Math.Max(1, (int)MathF.Floor(spectrumWidth / (barWidth + barGap)));
         var spectrumHeight = spectrumMax.Y - spectrumMin.Y;
         var spectrumCenter = (barCount - 1) * 0.5f;
+        // The extreme high bins are usually empty in the compressed tracks used
+        // by the player. Use the responsive audible half of the spectrum for the
+        // mirrored edges so the first and last bars do not become static pixels.
+        var displayBandLimit = Math.Max(2, floatingSpectrumLevels.Length / 2);
         for (var i = 0; i < barCount; i++)
         {
             // Put the low-frequency start of the analyser in the middle and
@@ -1014,7 +1018,7 @@ public sealed class MainWindow
             // static-looking block.
             var distanceFromCenter = MathF.Abs(i - spectrumCenter) /
                 Math.Max(1f, spectrumCenter);
-            var fftIndex = (int)MathF.Round(distanceFromCenter * (floatingSpectrumLevels.Length - 1));
+            var fftIndex = (int)MathF.Round(distanceFromCenter * (displayBandLimit - 1));
             var fftLevel = floatingSpectrumLevels[Math.Clamp(fftIndex, 0, floatingSpectrumLevels.Length - 1)];
             var barHeight = nowPlayingIsPlaying
                 ? Math.Max(6f, fftLevel * spectrumHeight * 0.80f)
