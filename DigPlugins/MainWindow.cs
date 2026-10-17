@@ -3519,13 +3519,15 @@ public sealed class MainWindow
         private const int BandCount = 64;
         private const float MinDecibels = -100f;
         private const float MaxDecibels = -30f;
-        private const float SmoothingTimeConstant = 0.85f;
         private const long SpectrumUpdateIntervalMs = 33;
         private const float HighFrequencyTiltDecibels = 18f;
         private const float DynamicFloorRatio = 0.16f;
         private const int TailPropagationStartBand = 24;
         private const float TailPropagationDecay = 0.985f;
         private const float TailPropagationRatio = 0.24f;
+        private const float DisplayGain = 1.35f;
+        private const float AttackSmoothing = 0.52f;
+        private const float ReleaseSmoothing = 0.78f;
         private readonly ISampleProvider source;
         private readonly int channels;
         private readonly float[] frame = new float[FftSize];
@@ -3576,8 +3578,9 @@ public sealed class MainWindow
                     lastSpectrumUpdateMs = now;
                     for (var band = 0; band < BandCount; band++)
                     {
-                        levels[band] = levels[band] * SmoothingTimeConstant +
-                            rawLevels[band] * (1f - SmoothingTimeConstant);
+                        var target = Math.Clamp(rawLevels[band] * DisplayGain, 0f, 1f);
+                        var smoothing = target > levels[band] ? AttackSmoothing : ReleaseSmoothing;
+                        levels[band] = levels[band] * smoothing + target * (1f - smoothing);
                     }
                 }
                 Array.Copy(levels, destination, Math.Min(levels.Length, destination.Length));
