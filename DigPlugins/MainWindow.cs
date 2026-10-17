@@ -2313,9 +2313,14 @@ public sealed class MainWindow
         }
 
         var priceInputTopLeft = ImGui.GetCursorScreenPos();
+        var priceLabelWidth = ImGui.CalcTextSize("补图最高单价").X;
+        var priceInputWidth = Math.Min(
+            550f,
+            Math.Max(120f, ImGui.GetContentRegionAvail().X - priceLabelWidth - ImGui.GetStyle().ItemSpacing.X));
         DrawAemeathInputShell(priceInputTopLeft,
-            new Vector2(Math.Min(560f, ImGui.GetContentRegionAvail().X), 30f), maxUnitPriceEnabled);
+            new Vector2(priceInputWidth, 30f), maxUnitPriceEnabled);
         ImGui.BeginDisabled(!maxUnitPriceEnabled);
+        ImGui.SetNextItemWidth(priceInputWidth);
         ImGui.PushStyleColor(ImGuiCol.Text, AemeathInk);
         ImGui.InputText("补图最高单价", ref mapSupplementMaxUnitPriceInput, 32,
             ImGuiInputTextFlags.CharsDecimal | ImGuiInputTextFlags.EnterReturnsTrue);
