@@ -8,18 +8,21 @@
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <UseWindowsForms>true</UseWindowsForms>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <AssemblyName>AutoTreasureHunt</AssemblyName>
     <RootNamespace>AutoTreasureHunt</RootNamespace>
-    <Version>1.0.7.4</Version>
-    <AssemblyVersion>1.0.7.4</AssemblyVersion>
-    <FileVersion>1.0.7.4</FileVersion>
-    <InformationalVersion>1.0.7.4</InformationalVersion>
+    <Version>1.0.7.5</Version>
+    <AssemblyVersion>1.0.7.5</AssemblyVersion>
+    <FileVersion>1.0.7.5</FileVersion>
+    <InformationalVersion>1.0.7.5</InformationalVersion>
     <AssemblyTitle>海豹助手</AssemblyTitle>
     <Product>海豹助手</Product>
     <DalamudLibPath Condition="'$(DalamudLibPath)' == ''">C:\Users\admin\.nuget\packages\aeassist.net\1.2.15\lib\net10.0</DalamudLibPath>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
+    <PackageReference Include="NAudio.WinMM" Version="2.2.1" />
     <Reference Include="Dalamud">
       <HintPath>$(DalamudLibPath)\Dalamud.dll</HintPath>
       <Private>false</Private>
@@ -62,6 +65,9 @@
     <None Include="Resources\FleetSnowfluff\pixel-seal-cool.gif" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Resources\FleetSnowfluff\pixel-seal-cute.gif" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Resources\FleetSnowfluff\UranusCN.ttf" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Resources\FleetSnowfluff\site-background.jpg" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Resources\FleetSnowfluff\site-background-clean.jpg" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Resources\FleetSnowfluff\now-playing-cover.jpg" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

@@ -444,6 +444,7 @@ public sealed class Plugin : IDalamudPlugin
 
     public unsafe Plugin(
         IDalamudPluginInterface pluginInterface,
+        IGameConfig gameConfig,
         IGameInventory gameInventory,
         IGameGui gameGui,
         IChatGui chatGui,
@@ -529,7 +530,7 @@ public sealed class Plugin : IDalamudPlugin
         gameGui.HoveredItemChanged += globetrotterTreasureMapCore.OnHover;
 
         ValidateSavedCredential();
-        mainWindow = new MainWindow(this, this.pluginInterface, dataManager, textureProvider);
+        mainWindow = new MainWindow(this, this.pluginInterface, dataManager, textureProvider, framework, gameConfig);
         this.gameInventory.InventoryChanged += OnInventoryChanged;
         this.chatGui.ChatMessage += OnChatMessage;
         this.clientState.ZoneInit += OnZoneInit;

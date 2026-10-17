@@ -1,6 +1,7 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Plugin;
+using Dalamud.Game.Config;
 using Dalamud.Interface.Textures;
 using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Plugin.Services;
@@ -10,20 +11,28 @@ using Lumina.Excel.Sheets;
 using System.Globalization;
 using System.Drawing;
 using System.Drawing.Imaging;
+using NAudio.Wave;
 
 namespace AutoTreasureHunt;
 
 public sealed class MainWindow
 {
+    private static readonly HttpClient NowPlayingHttpClient = new() { Timeout = TimeSpan.FromMinutes(10) };
     private const string RememberedCredentialMask = "********";
     private static readonly Vector4 RunningColor = new(0.08f, 0.57f, 0.38f, 1.00f);
     private static readonly Vector4 StoppedColor = new(0.78f, 0.20f, 0.31f, 1.00f);
-    // Aemeath's visual language: deep starfield, rose hair, cyan energy, and star gold.
+    // FleetSnowfluff's site palette: lavender glass, rose accents, cyan pixels and cream highlights.
     private static readonly Vector4 AemeathPink = new(0.95f, 0.39f, 0.65f, 1.00f);
     private static readonly Vector4 AemeathCyan = new(0.29f, 0.89f, 0.88f, 1.00f);
-    private static readonly Vector4 AemeathGold = new(0.94f, 0.79f, 0.45f, 1.00f);
+    private static readonly Vector4 AemeathGold = new(0.58f, 0.39f, 0.15f, 1.00f);
     private static readonly Vector4 AemeathInk = new(0.94f, 0.96f, 1.00f, 1.00f);
     private static readonly Vector4 AemeathMuted = new(0.63f, 0.70f, 0.86f, 1.00f);
+    private static readonly Vector4 AemeathBodyInk = new(0.18f, 0.11f, 0.32f, 1.00f);
+    private static readonly Vector4 AemeathBodyMuted = new(0.29f, 0.20f, 0.44f, 1.00f);
+    private static readonly Vector4 AemeathTextPink = new(0.48f, 0.12f, 0.34f, 1.00f);
+    private static readonly Vector4 AemeathTextCyan = new(0.00f, 0.31f, 0.37f, 1.00f);
+    private static readonly Vector4 AemeathTextGold = new(0.43f, 0.27f, 0.08f, 1.00f);
+    private static readonly Vector4 SitePixelBorder = new(1.00f, 0.78f, 0.91f, 1.00f);
     // The shell stays translucent, while the content surfaces remain opaque enough to hide game text.
     private static readonly Vector4 AemeathNavy = new(0.025f, 0.045f, 0.12f, 0.78f);
     private static readonly Vector4 AemeathPanel = new(0.00f, 0.00f, 0.00f, 0.00f);
@@ -40,6 +49,10 @@ public sealed class MainWindow
     private readonly IDalamudPluginInterface pluginInterface;
     private readonly IDataManager dataManager;
     private readonly ITextureProvider textureProvider;
+    private readonly IFramework framework;
+    private readonly IGameConfig gameConfig;
+    private readonly ISharedImmediateTexture? fleetPanelBackground;
+    private readonly ISharedImmediateTexture? nowPlayingCoverTexture;
     private readonly Dictionary<uint, ISharedImmediateTexture?> mapIconCache = new();
     private readonly object fleetTextureLock = new();
     private readonly CancellationTokenSource fleetTextureLoadCancellation = new();
@@ -94,6 +107,70 @@ public sealed class MainWindow
     private int mapSupplementMaxUnitPriceObserved;
     private MainPage activePage = MainPage.Automation;
     private bool treasureMapSelectorOpen;
+    private int miniPlayerTrackIndex;
+    private int nowPlayingTrackIndex = 7;
+    private int nowPlayingModeIndex;
+    private float nowPlayingVolume = 0.8f;
+    private bool nowPlayingVolumeOpen;
+    private bool nowPlayingIsPlaying;
+    private bool nowPlayingIsLoading;
+    private bool nowPlayingDisposed;
+    private int nowPlayingRequestId;
+    private string nowPlayingStatus = string.Empty;
+    private MediaFoundationReader? nowPlayingReader;
+    private WaveOutEvent? nowPlayingOutput;
+    private EventHandler<StoppedEventArgs>? nowPlayingStoppedHandler;
+    private CancellationTokenSource? nowPlayingLoadCancellation;
+    private bool gameBgmSuppressed;
+    private uint savedGameBgmVolume;
+    private static readonly string[] NowPlayingTrackFiles =
+    {
+        "我与你 - 鸣潮先约电台、auburn.mp3",
+        "小小奇迹 (尚未发布(๑•̀ᴗ- )✧✩°｡⋆！) (尚未发布(๑•̀ᴗ- )✧✩°｡⋆！) - 鸣潮先约电台、飞行雪绒、jixwang、TLK天翔.mp3",
+        "小小奇迹 - 鸣潮先约电台、jixwang、飞行雪绒.mp3",
+        "星炬不熄 - 鸣潮先约电台、飞行雪绒、星炬学院毕业生.mp3",
+        "未完成的奇迹 - 鸣潮先约电台、飞行雪绒、jixwang、TLK天翔.mp3",
+        "纸飞机 - 鸣潮先约电台、飞行雪绒.mp3",
+        "远航星的告别 (Instrumental) - 鸣潮先约电台、jixwang.mp3",
+        "那颗星梦见的春日 - 鸣潮先约电台、jixwang、小林未郁.mp3",
+        "停泊的舟 - 鸣潮先约电台、jixwang、飞行雪绒.mp3",
+        "远航星的告别 - 鸣潮先约电台、jixwang、Tarokiki、Emi Evans.mp3",
+        "飞行雪绒的练习时间 - 鸣潮先约电台、飞行雪绒.mp3",
+        "碎花 - 鸣潮先约电台、飞行雪绒.mp3",
+        "靛青宇宙 - 鸣潮先约电台、飞行雪绒.mp3",
+        "Deadline Disco (极限迪斯科) (极限迪斯科) - 鸣潮先约电台、飞行雪绒.mp3",
+        "「拉海洛」之心 - 鸣潮先约电台、baitian、Victor Borba、Casey Lee Williams.mp3",
+        "月终恒常于瞬息 - 鸣潮先约电台、jixwang、R!NGemie.mp3",
+        "再于终末归还 - 鸣潮先约电台、jixwang、JINGYAN、Emi Evans.mp3",
+        "自无垠处归航之星 - 鸣潮先约电台、jixwang、R!NGemie.mp3",
+        "自无垠处归航之星(Instrumental) - 鸣潮先约电台、jixwang.mp3",
+        "开往春日的列车.mp3",
+    };
+    private static readonly string[] NowPlayingModes = { "列表播放", "列表循环", "单曲循环", "随机循环" };
+    private static readonly string[] MiniPlayerTracks =
+    {
+        "我与你 - 鸣潮先约电台、auburn",
+        "小小奇迹 (尚未发布) - 鸣潮先约电台、飞行雪绒、jixwang、TLK天翔",
+        "小小奇迹 - 鸣潮先约电台、jixwang、飞行雪绒",
+        "星炬不熄 - 鸣潮先约电台、飞行雪绒、星炬学院毕业生",
+        "未完成的奇迹 - 鸣潮先约电台、飞行雪绒、jixwang、TLK天翔",
+        "纸飞机 - 鸣潮先约电台、飞行雪绒、jixwang、JINGYAN、Emi Evans",
+        "自无垠处归航之星 - 鸣潮先约电台、jixwang、R!NGemie",
+        "自无垠处归航之星(Instrumental) - 鸣潮先约电台、jixwang",
+        "开往春日的列车",
+    };
+    private static readonly string[] MiniPlayerTrackFiles =
+    {
+        "我与你 - 鸣潮先约电台、auburn.mp3",
+        "小小奇迹 (尚未发布(๑•̀ᴗ- )✧✩°｡⋆！) (尚未发布(๑•̀ᴗ- )✧✩°｡⋆！) - 鸣潮先约电台、飞行雪绒、jixwang、TLK天翔.mp3",
+        "小小奇迹 - 鸣潮先约电台、jixwang、飞行雪绒.mp3",
+        "星炬不熄 - 鸣潮先约电台、飞行雪绒、星炬学院毕业生.mp3",
+        "未完成的奇迹 - 鸣潮先约电台、飞行雪绒、jixwang、TLK天翔.mp3",
+        "纸飞机 - 鸣潮先约电台、飞行雪绒、jixwang、JINGYAN、Emi Evans.mp3",
+        "自无垠处归航之星 - 鸣潮先约电台、jixwang、R!NGemie.mp3",
+        "自无垠处归航之星(Instrumental) - 鸣潮先约电台、jixwang.mp3",
+        "开往春日的列车.mp3",
+    };
     private readonly IFontAtlas fleetFontAtlas;
     private readonly IFontHandle fleetFontHandle;
     private static readonly ushort[] FleetChineseGlyphRanges =
@@ -110,12 +187,31 @@ public sealed class MainWindow
         Plugin plugin,
         IDalamudPluginInterface pluginInterface,
         IDataManager dataManager,
-        ITextureProvider textureProvider)
+        ITextureProvider textureProvider,
+        IFramework framework,
+        IGameConfig gameConfig)
     {
         this.plugin = plugin;
         this.pluginInterface = pluginInterface;
         this.dataManager = dataManager;
         this.textureProvider = textureProvider;
+        this.framework = framework;
+        this.gameConfig = gameConfig;
+        var panelBackgroundPath = Path.Combine(
+            pluginInterface.AssemblyLocation.DirectoryName ?? AppContext.BaseDirectory,
+            "Resources",
+            "FleetSnowfluff",
+            "site-background-clean.jpg");
+        if (File.Exists(panelBackgroundPath))
+            fleetPanelBackground = textureProvider.GetFromFile(panelBackgroundPath);
+
+        var nowPlayingCoverPath = Path.Combine(
+            pluginInterface.AssemblyLocation.DirectoryName ?? AppContext.BaseDirectory,
+            "Resources",
+            "FleetSnowfluff",
+            "now-playing-cover.jpg");
+        if (File.Exists(nowPlayingCoverPath))
+            nowPlayingCoverTexture = textureProvider.GetFromFile(nowPlayingCoverPath);
 
         var fontPath = Path.Combine(
             pluginInterface.AssemblyLocation.DirectoryName ?? AppContext.BaseDirectory,
@@ -172,10 +268,10 @@ public sealed class MainWindow
             return;
         }
 
-        DrawAemeathWindowBackdrop();
+        DrawWebsiteBackground();
         DrawAemeathWindowChrome();
         ImGui.SetCursorPos(new Vector2(16, 38));
-        DrawAemeathHero();
+        DrawNowPlayingHero();
         ImGui.Spacing();
 
         var bodyHeight = Math.Max(180f, ImGui.GetContentRegionAvail().Y - 10f);
@@ -184,10 +280,13 @@ public sealed class MainWindow
         var bodyBottom = bodyTopLeft.Y + bodyHeight;
         var bodyDrawList = ImGui.GetWindowDrawList();
         const float sidebarWidth = 218f;
+        DrawTabBarBackground(
+            bodyTopLeft,
+            new Vector2(bodyTopLeft.X + sidebarWidth, bodyBottom));
         bodyDrawList.AddRectFilled(
             bodyTopLeft,
             new Vector2(bodyTopLeft.X + sidebarWidth, bodyBottom),
-            ImGui.GetColorU32(new Vector4(0.075f, 0.035f, 0.16f, 0.14f)),
+            ImGui.GetColorU32(new Vector4(0.075f, 0.035f, 0.16f, 0.035f)),
             10f);
         bodyDrawList.AddRect(
             bodyTopLeft,
@@ -200,7 +299,7 @@ public sealed class MainWindow
         bodyDrawList.AddRectFilled(
             pageTopLeft,
             new Vector2(bodyRight, bodyBottom),
-            ImGui.GetColorU32(new Vector4(0.075f, 0.035f, 0.16f, 0.12f)),
+            ImGui.GetColorU32(new Vector4(0.075f, 0.035f, 0.16f, 0.03f)),
             10f);
         bodyDrawList.AddRect(
             pageTopLeft,
@@ -236,6 +335,12 @@ public sealed class MainWindow
 
     public void Dispose()
     {
+        nowPlayingDisposed = true;
+        nowPlayingRequestId++;
+        nowPlayingLoadCancellation?.Cancel();
+        nowPlayingLoadCancellation = null;
+        DisposeNowPlayingPlayback();
+
         IDalamudTextureWrap[][]? rows;
         lock (aemeathSpriteLock)
         {
@@ -651,24 +756,24 @@ public sealed class MainWindow
         ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 14f);
         ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(16, 14));
-        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 7f);
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 3f);
         ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 10f);
         ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(8, 7));
-        ImGui.PushStyleVar(ImGuiStyleVar.FrameBorderSize, 0f);
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1f);
         ImGui.PushStyleColor(ImGuiCol.WindowBg, AemeathNavy);
         ImGui.PushStyleColor(ImGuiCol.TitleBg, new Vector4(0.035f, 0.06f, 0.16f, 0.96f));
         ImGui.PushStyleColor(ImGuiCol.TitleBgActive, new Vector4(0.05f, 0.08f, 0.22f, 0.98f));
         ImGui.PushStyleColor(ImGuiCol.TitleBgCollapsed, new Vector4(0.035f, 0.06f, 0.16f, 0.94f));
         ImGui.PushStyleColor(ImGuiCol.ChildBg, AemeathPanel);
-        ImGui.PushStyleColor(ImGuiCol.Border, new Vector4(0.29f, 0.89f, 0.88f, 0.28f));
-        ImGui.PushStyleColor(ImGuiCol.Text, AemeathInk);
-        ImGui.PushStyleColor(ImGuiCol.TextDisabled, AemeathMuted);
+        ImGui.PushStyleColor(ImGuiCol.Border, new Vector4(0.91f, 0.76f, 0.96f, 0.72f));
+        ImGui.PushStyleColor(ImGuiCol.Text, AemeathBodyInk);
+        ImGui.PushStyleColor(ImGuiCol.TextDisabled, AemeathBodyMuted);
         ImGui.PushStyleColor(ImGuiCol.FrameBg, new Vector4(0f, 0f, 0f, 0f));
         ImGui.PushStyleColor(ImGuiCol.FrameBgHovered, new Vector4(0f, 0f, 0f, 0f));
         ImGui.PushStyleColor(ImGuiCol.FrameBgActive, new Vector4(0f, 0f, 0f, 0f));
-        ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.10f, 0.16f, 0.32f, 0.82f));
-        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.20f, 0.35f, 0.48f, 0.92f));
-        ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.55f, 0.16f, 0.36f, 0.96f));
+        ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.34f, 0.25f, 0.54f, 0.84f));
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.55f, 0.37f, 0.68f, 0.92f));
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.79f, 0.29f, 0.58f, 0.94f));
         ImGui.PushStyleColor(ImGuiCol.Header, new Vector4(0.10f, 0.22f, 0.37f, 0.82f));
         ImGui.PushStyleColor(ImGuiCol.HeaderHovered, new Vector4(0.16f, 0.34f, 0.45f, 0.92f));
         ImGui.PushStyleColor(ImGuiCol.HeaderActive, new Vector4(0.55f, 0.16f, 0.36f, 0.94f));
@@ -694,22 +799,17 @@ public sealed class MainWindow
 
     private void DrawAemeathWindowChrome()
     {
-        const float headerHeight = 42f;
         var drawList = ImGui.GetWindowDrawList();
         var position = ImGui.GetWindowPos();
         var size = ImGui.GetWindowSize();
 
-        // The chrome is a compact pixel badge and two color channels, not a second portrait.
-        var headerEnd = position + new Vector2(size.X, headerHeight);
-        drawList.AddRectFilled(position, headerEnd,
-            ImGui.GetColorU32(new Vector4(0.13f, 0.055f, 0.24f, 0.24f)),
-            14f, ImDrawFlags.RoundCornersTop);
+        // Keep the title over the shared background instead of giving it a separate dark slab.
         drawList.AddRect(position + new Vector2(1f, 1f), position + size - new Vector2(1f, 1f),
             ImGui.GetColorU32(new Vector4(0.52f, 0.35f, 0.76f, 0.36f)),
             14f, ImDrawFlags.RoundCornersAll, 1f);
 
         ImGui.SetCursorScreenPos(position + new Vector2(18f, 13f));
-        ImGui.TextColored(AemeathInk, "海豹助手");
+        ImGui.TextColored(AemeathBodyInk, "海豹助手");
 
         ImGui.SetCursorScreenPos(position + new Vector2(size.X - 48f, 6f));
         if (ImGui.InvisibleButton("##AemeathClose", new Vector2(34f, 24f)))
@@ -734,29 +834,65 @@ public sealed class MainWindow
         return;
     }
 
-    private void DrawAemeathWindowBackdrop()
+    private void DrawWebsiteBackground()
     {
+        var sharedTexture = fleetPanelBackground;
+        if (sharedTexture is null || !sharedTexture.TryGetWrap(out var texture, out _))
+            return;
+
         var drawList = ImGui.GetWindowDrawList();
         var windowPosition = ImGui.GetWindowPos();
         var windowSize = ImGui.GetWindowSize();
-        const float cornerRadius = 14f;
-        var backdropMin = windowPosition + new Vector2(1f, 1f);
-        var backdropMax = windowPosition + windowSize - new Vector2(1f, 1f);
-        var backdropSize = backdropMax - backdropMin;
-        if (backdropSize.X <= 0f || backdropSize.Y <= 0f)
+        var min = windowPosition + new Vector2(1f, 1f);
+        var max = windowPosition + windowSize - new Vector2(1f, 1f);
+        if (max.X <= min.X || max.Y <= min.Y)
             return;
 
-        drawList.PushClipRect(windowPosition, windowPosition + windowSize, false);
-        DrawScreenBackground(drawList, backdropMin, backdropMax, 1f, cornerRadius);
+        const float sourceAspect = 16f / 9f;
+        var targetAspect = (max.X - min.X) / (max.Y - min.Y);
+        var uvMin = Vector2.Zero;
+        var uvMax = Vector2.One;
+        if (targetAspect < sourceAspect)
+        {
+            var visibleWidth = targetAspect / sourceAspect;
+            uvMin.X = (1f - visibleWidth) * 0.5f;
+            uvMax.X = uvMin.X + visibleWidth;
+        }
+        else if (targetAspect > sourceAspect)
+        {
+            var visibleHeight = sourceAspect / targetAspect;
+            uvMin.Y = (1f - visibleHeight) * 0.5f;
+            uvMax.Y = uvMin.Y + visibleHeight;
+        }
+
+        const float cornerRadius = 14f;
+        drawList.PushClipRect(min, max, false);
+        drawList.AddImageRounded(texture.Handle, min, max, uvMin, uvMax,
+            ImGui.GetColorU32(Vector4.One), cornerRadius, ImDrawFlags.RoundCornersAll);
+        drawList.AddRectFilled(min, max,
+            ImGui.GetColorU32(new Vector4(0.12f, 0.035f, 0.22f, 0.18f)),
+            cornerRadius, ImDrawFlags.RoundCornersAll);
         drawList.PopClipRect();
     }
 
-    private static void DrawScreenBackground(
+    private void DrawTabBarBackground(Vector2 sidebarMin, Vector2 sidebarMax)
+    {
+        var drawList = ImGui.GetWindowDrawList();
+        var backdropMin = sidebarMin + new Vector2(1f, 0f);
+        var backdropMax = sidebarMax - new Vector2(1f, 1f);
+        if (backdropMax.X <= backdropMin.X || backdropMax.Y <= backdropMin.Y)
+            return;
+
+        drawList.PushClipRect(backdropMin, backdropMax, false);
+        DrawDataStreams(drawList, backdropMin, backdropMax, 1f);
+        drawList.PopClipRect();
+    }
+
+    private static void DrawDataStreams(
         ImDrawListPtr drawList,
         Vector2 min,
         Vector2 max,
-        float strength,
-        float rounding)
+        float strength)
     {
         var size = max - min;
         if (size.X <= 2f || size.Y <= 2f)
@@ -769,79 +905,6 @@ public sealed class MainWindow
         var screenSize = screenMax - screenMin;
         if (screenSize.X <= 8f || screenSize.Y <= 8f)
             return;
-
-        // Extend the purple display and its animated details across the full client area.
-        drawList.AddRectFilled(screenMin, screenMax,
-            ImGui.GetColorU32(new Vector4(0.20f, 0.13f, 0.38f, 0.98f * strength)),
-            rounding, ImDrawFlags.RoundCornersAll);
-        const int gradientBands = 38;
-        for (var band = 0; band < gradientBands; band++)
-        {
-            var t = band / (float)(gradientBands - 1);
-            var centerWeight = 1f - MathF.Min(1f, MathF.Abs(t - 0.47f) * 1.85f);
-            var pinkWeight = 0.30f + centerWeight * 0.58f;
-            var blueWeight = 0.42f + (1f - centerWeight) * 0.33f;
-            var bandYMin = screenMin.Y + screenSize.Y * t;
-            var bandYMax = screenMin.Y + screenSize.Y * ((band + 1) / (float)gradientBands);
-            var cornerInset = Math.Max(
-                RoundedCornerInset(bandYMin, screenMin.Y, screenMax.Y, rounding),
-                RoundedCornerInset(bandYMax, screenMin.Y, screenMax.Y, rounding));
-            var bandMin = new Vector2(screenMin.X + cornerInset, bandYMin);
-            var bandMax = new Vector2(screenMax.X - cornerInset, bandYMax);
-            drawList.AddRectFilled(bandMin, bandMax,
-                ImGui.GetColorU32(new Vector4(
-                    0.12f + pinkWeight * 0.22f,
-                    0.07f + pinkWeight * 0.12f,
-                    0.29f + blueWeight * 0.28f,
-                    (0.34f + centerWeight * 0.18f) * strength)), 0f);
-        }
-
-        var centerX = screenMin.X + screenSize.X * 0.50f;
-        var centerY = screenMin.Y + screenSize.Y * 0.53f;
-        for (var glow = 8; glow >= 1; glow--)
-        {
-            var fraction = glow / 8f;
-            var halfWidth = screenSize.X * (0.10f + fraction * 0.44f);
-            var alpha = (0.010f + (1f - fraction) * 0.020f) * strength;
-            drawList.AddRectFilled(
-                new Vector2(centerX - halfWidth, screenMin.Y),
-                new Vector2(centerX + halfWidth, screenMax.Y),
-                ImGui.GetColorU32(new Vector4(0.95f, 0.35f, 0.78f, alpha)), 0f);
-        }
-        drawList.AddRectFilled(
-            new Vector2(centerX - screenSize.X * 0.24f, centerY - screenSize.Y * 0.36f),
-            new Vector2(centerX + screenSize.X * 0.24f, centerY + screenSize.Y * 0.34f),
-            ImGui.GetColorU32(new Vector4(1.00f, 0.55f, 0.83f, 0.035f * strength)), 0f);
-
-        // Scanlines, grain and complete glyphs reproduce the CRT texture without broken pixels.
-        var lineSpacing = Math.Clamp(screenSize.Y / 106f, 1.15f, 2.8f);
-        var lineIndex = 0;
-        for (var y = screenMin.Y + 0.5f; y < screenMax.Y - 0.5f; y += lineSpacing, lineIndex++)
-        {
-            var cornerInset = RoundedCornerInset(y, screenMin.Y, screenMax.Y, rounding);
-            var pulse = 0.5f + 0.5f * MathF.Sin((float)time * 1.35f + lineIndex * 0.37f);
-            var lineColor = (lineIndex & 3) == 0
-                ? new Vector4(0.96f, 0.57f, 0.88f, (0.050f + pulse * 0.040f) * strength)
-                : new Vector4(0.51f, 0.76f, 0.98f, (0.034f + pulse * 0.028f) * strength);
-            drawList.AddRectFilled(new Vector2(screenMin.X + cornerInset, y),
-                new Vector2(screenMax.X - cornerInset, y + 0.66f), ImGui.GetColorU32(lineColor), 0f);
-        }
-
-        var tick = (uint)Math.Max(0, (int)(time * 18d));
-        for (var grain = 0; grain < 150; grain++)
-        {
-            var gy = screenMin.Y + ScreenHash(tick + (uint)(grain * 31 + 19)) * screenSize.Y;
-            var cornerInset = RoundedCornerInset(gy, screenMin.Y, screenMax.Y, rounding);
-            var grainWidth = Math.Max(0f, screenSize.X - cornerInset * 2f);
-            var gx = screenMin.X + cornerInset + ScreenHash(tick + (uint)(grain * 17 + 7)) * grainWidth;
-            var grainSize = 0.45f + ScreenHash((uint)(grain * 47 + 23)) * 1.55f;
-            var grainAlpha = (0.025f + ScreenHash((uint)(grain * 71 + tick)) * 0.075f) * strength;
-            var grainColor = (grain & 1) == 0
-                ? new Vector4(0.72f, 0.91f, 1.00f, grainAlpha)
-                : new Vector4(1.00f, 0.56f, 0.84f, grainAlpha);
-            drawList.AddRectFilled(new Vector2(gx, gy), new Vector2(gx + grainSize, gy + grainSize),
-                ImGui.GetColorU32(grainColor), 0f);
-        }
 
         var glyphPixel = Math.Clamp(screenSize.X / 220f, 2.8f, 4.3f);
         var glyphHeight = glyphPixel * 5f;
@@ -940,9 +1003,691 @@ public sealed class MainWindow
     }
 
 
+    private void DrawNowPlayingHero()
+    {
+        const float heroHeight = 216f;
+        const float coverSize = 128f;
+        const float cassetteWidth = 205f;
+        if (!ImGui.BeginChild("NowPlayingHero", new Vector2(-1f, heroHeight), false,
+                ImGuiWindowFlags.NoScrollbar))
+        {
+            ImGui.EndChild();
+            return;
+        }
+
+        var drawList = ImGui.GetWindowDrawList();
+        var origin = ImGui.GetWindowPos();
+        var windowSize = ImGui.GetWindowSize();
+        var headerPosition = origin + new Vector2(2f, 1f);
+        drawList.AddText(headerPosition + Vector2.One, ImGui.GetColorU32(new Vector4(0.17f, 0.12f, 0.30f, 0.65f)),
+            "NOW PLAYING");
+        drawList.AddText(headerPosition, ImGui.GetColorU32(new Vector4(1f, 0.91f, 0.99f, 1f)),
+            "NOW PLAYING");
+
+        var visualTop = origin + new Vector2(2f, 24f);
+        var coverMax = visualTop + new Vector2(coverSize, coverSize);
+        drawList.AddRectFilled(visualTop + new Vector2(3f, 3f), coverMax + new Vector2(3f, 3f),
+            ImGui.GetColorU32(new Vector4(0.20f, 0.13f, 0.33f, 0.76f)));
+        if (nowPlayingCoverTexture?.TryGetWrap(out var cover, out _) == true)
+            drawList.AddImage(cover.Handle, visualTop, coverMax);
+        else
+            drawList.AddRectFilled(visualTop, coverMax,
+                ImGui.GetColorU32(new Vector4(0.46f, 0.34f, 0.63f, 0.90f)));
+        drawList.AddRect(visualTop, coverMax,
+            ImGui.GetColorU32(new Vector4(0.83f, 0.72f, 0.95f, 1f)), 0f, ImDrawFlags.None, 2f);
+
+        var cassetteTop = visualTop + new Vector2(154f, 0f);
+        DrawPixelCassette(drawList, cassetteTop, new Vector2(cassetteWidth, coverSize),
+            nowPlayingIsPlaying ? (float)ImGui.GetTime() : 0f);
+
+        var title = Path.GetFileNameWithoutExtension(NowPlayingTrackFiles[nowPlayingTrackIndex]);
+        var titleSplit = title.IndexOf(" - ", StringComparison.Ordinal);
+        var titlePosition = origin + new Vector2(2f, 158f);
+        drawList.PushClipRect(titlePosition, new Vector2(origin.X + 368f, origin.Y + heroHeight), true);
+        var titleSong = titleSplit >= 0 ? title[..titleSplit] : title;
+        var titleArtists = titleSplit >= 0 ? title[(titleSplit + 3)..] : string.Empty;
+        var titleColor = ImGui.GetColorU32(new Vector4(1f, 0.91f, 0.99f, 1f));
+        var titleShadow = ImGui.GetColorU32(new Vector4(0.17f, 0.12f, 0.30f, 0.75f));
+        drawList.AddText(titlePosition + Vector2.One, titleShadow, titleSong);
+        drawList.AddText(titlePosition, titleColor, titleSong);
+        if (!string.IsNullOrEmpty(titleArtists))
+        {
+            drawList.AddText(titlePosition + new Vector2(0f, 18f) + Vector2.One, titleShadow, titleArtists);
+            drawList.AddText(titlePosition + new Vector2(0f, 18f), titleColor, titleArtists);
+        }
+        drawList.PopClipRect();
+
+        var leftColumnWidth = Math.Min(370f, windowSize.X * 0.43f);
+        DrawNowPlayingProgress(drawList, origin, leftColumnWidth, 194f);
+        DrawMusicControlsPanel(drawList,
+            origin + new Vector2(leftColumnWidth + 12f, 0f),
+            new Vector2(Math.Max(320f, windowSize.X - leftColumnWidth - 14f), heroHeight));
+        ImGui.EndChild();
+    }
+
+    private void DrawNowPlayingProgress(ImDrawListPtr drawList, Vector2 origin, float width, float y)
+    {
+        var elapsed = 0d;
+        var duration = 0d;
+        try
+        {
+            if (nowPlayingReader is not null)
+            {
+                elapsed = nowPlayingReader.CurrentTime.TotalSeconds;
+                duration = nowPlayingReader.TotalTime.TotalSeconds;
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            elapsed = 0d;
+            duration = 0d;
+        }
+
+        var leftTime = origin + new Vector2(2f, y);
+        var rightTime = origin + new Vector2(width - 38f, y);
+        var sliderPosition = origin + new Vector2(42f, y + 4f);
+        var sliderSize = new Vector2(Math.Max(50f, width - 84f), 10f);
+        ImGui.SetCursorScreenPos(sliderPosition - new Vector2(0f, 3f));
+        ImGui.InvisibleButton("##NowPlayingProgress", sliderSize + new Vector2(0f, 6f));
+        var hovered = ImGui.IsItemHovered();
+        var active = ImGui.IsItemActive();
+        if (duration > 0 && (active || ImGui.IsItemClicked()))
+        {
+            var progress = Math.Clamp((ImGui.GetIO().MousePos.X - sliderPosition.X) / sliderSize.X, 0f, 1f);
+            elapsed = duration * progress;
+            try
+            {
+                if (nowPlayingReader is not null)
+                    nowPlayingReader.CurrentTime = TimeSpan.FromSeconds(elapsed);
+            }
+            catch (ObjectDisposedException)
+            {
+                elapsed = 0d;
+                duration = 0d;
+            }
+        }
+
+        var trackMax = sliderPosition + sliderSize;
+        drawList.AddRectFilled(sliderPosition, trackMax,
+            ImGui.GetColorU32(new Vector4(0.31f, 0.24f, 0.51f, 0.62f)));
+        drawList.AddRect(sliderPosition, trackMax,
+            ImGui.GetColorU32(new Vector4(1f, 0.78f, 0.91f, 0.86f)), 0f, ImDrawFlags.None, 1.5f);
+        if (duration > 0)
+        {
+            var filled = new Vector2(sliderSize.X * (float)Math.Clamp(elapsed / duration, 0d, 1d), sliderSize.Y);
+            drawList.AddRectFilled(sliderPosition, sliderPosition + filled,
+                ImGui.GetColorU32(new Vector4(1f, 0.61f, 0.85f, 0.96f)));
+            var thumbX = sliderPosition.X + sliderSize.X * (float)Math.Clamp(elapsed / duration, 0d, 1d);
+            drawList.AddRectFilled(new Vector2(thumbX - 2f, sliderPosition.Y - 3f),
+                new Vector2(thumbX + 2f, sliderPosition.Y + sliderSize.Y + 3f),
+                ImGui.GetColorU32(new Vector4(1f, 0.96f, 1f, 1f)));
+        }
+
+        drawList.AddText(leftTime, ImGui.GetColorU32(new Vector4(1f, 0.91f, 0.99f, 1f)), FormatPlayerTime(elapsed));
+        drawList.AddText(rightTime, ImGui.GetColorU32(new Vector4(1f, 0.91f, 0.99f, 1f)), FormatPlayerTime(duration));
+        if (hovered && !string.IsNullOrEmpty(nowPlayingStatus))
+        {
+            ImGui.BeginTooltip();
+            ImGui.TextUnformatted(nowPlayingStatus);
+            ImGui.EndTooltip();
+        }
+    }
+
+    private static string FormatPlayerTime(double seconds)
+    {
+        if (!double.IsFinite(seconds) || seconds < 0)
+            seconds = 0;
+
+        var time = TimeSpan.FromSeconds(seconds);
+        return time.TotalHours >= 1
+            ? $"{(int)time.TotalHours}:{time.Minutes:00}:{time.Seconds:00}"
+            : $"{time.Minutes}:{time.Seconds:00}";
+    }
+
+    private void DrawMusicControlsPanel(ImDrawListPtr drawList, Vector2 topLeft, Vector2 size)
+    {
+        var bottomRight = topLeft + size;
+        drawList.AddRectFilled(topLeft, bottomRight,
+            ImGui.GetColorU32(new Vector4(0.47f, 0.37f, 0.73f, 0.35f)), 14f);
+        drawList.AddRect(topLeft, bottomRight,
+            ImGui.GetColorU32(new Vector4(1f, 0.61f, 0.85f, 0.60f)), 14f,
+            ImDrawFlags.RoundCornersAll, 2f);
+        drawList.AddLine(topLeft + new Vector2(15f, 3f), new Vector2(bottomRight.X - 15f, topLeft.Y + 3f),
+            ImGui.GetColorU32(new Vector4(1f, 0.95f, 1f, 0.20f)), 1f);
+        drawList.AddLine(new Vector2(topLeft.X + 15f, bottomRight.Y - 3f), bottomRight - new Vector2(15f, 3f),
+            ImGui.GetColorU32(new Vector4(0.24f, 0.16f, 0.40f, 0.24f)), 1f);
+
+        var rowWidth = Math.Min(360f, size.X - 24f);
+        var rowGap = Math.Clamp(size.X * 0.022f, 9f, 17f);
+        var cellWidth = (rowWidth - rowGap * 2f) / 3f;
+        var rowLeft = topLeft.X + (size.X - rowWidth) * 0.5f;
+        var buttonY = topLeft.Y + 12f;
+        var transportSize = new Vector2(cellWidth, 76f);
+        DrawPlayerTransportButton("PlayerPrevious", new Vector2(rowLeft, buttonY), transportSize, "previous");
+        DrawPlayerTransportButton("PlayerToggle", new Vector2(rowLeft + cellWidth + rowGap, buttonY), transportSize,
+            nowPlayingIsPlaying || nowPlayingIsLoading ? "pause" : "play");
+        DrawPlayerTransportButton("PlayerNext", new Vector2(rowLeft + (cellWidth + rowGap) * 2f, buttonY), transportSize, "next");
+
+        var volumeSize = new Vector2(size.X - 24f, 34f);
+        var volumePosition = new Vector2(topLeft.X + 12f, topLeft.Y + 100f);
+        ImGui.SetCursorScreenPos(volumePosition);
+        if (ImGui.InvisibleButton("##PlayerVolume", volumeSize))
+            nowPlayingVolumeOpen = !nowPlayingVolumeOpen;
+        var volumeLabel = $"音量 {MathF.Round(nowPlayingVolume * 100f)}%";
+        var volumeTextSize = ImGui.CalcTextSize(volumeLabel);
+        var volumeShadow = ImGui.GetColorU32(new Vector4(0.36f, 0.23f, 0.56f, 0.95f));
+        drawList.AddText(volumePosition + new Vector2((volumeSize.X - volumeTextSize.X) * 0.5f + 2f, 7f),
+            volumeShadow, volumeLabel);
+        drawList.AddText(volumePosition + new Vector2((volumeSize.X - volumeTextSize.X) * 0.5f, 5f),
+            ImGui.GetColorU32(new Vector4(1f, 0.96f, 1f, 1f)), volumeLabel);
+        var modeY = topLeft.Y + 164f;
+        if (nowPlayingVolumeOpen)
+        {
+            var sliderPosition = new Vector2(topLeft.X + 24f, topLeft.Y + 138f);
+            var sliderSize = new Vector2(size.X - 48f, 12f);
+            ImGui.SetCursorScreenPos(sliderPosition);
+            ImGui.InvisibleButton("##PlayerVolumeSlider", sliderSize);
+            if (ImGui.IsItemActive() || ImGui.IsItemClicked())
+                nowPlayingVolume = Math.Clamp((ImGui.GetIO().MousePos.X - sliderPosition.X) / sliderSize.X, 0f, 1f);
+            if (nowPlayingOutput is not null)
+                nowPlayingOutput.Volume = nowPlayingVolume;
+            drawList.AddRectFilled(sliderPosition, sliderPosition + sliderSize,
+                ImGui.GetColorU32(new Vector4(0.31f, 0.24f, 0.51f, 0.60f)));
+            drawList.AddRect(sliderPosition, sliderPosition + sliderSize,
+                ImGui.GetColorU32(new Vector4(1f, 0.61f, 0.85f, 0.62f)), 0f, ImDrawFlags.None, 2f);
+            var thumbX = sliderPosition.X + (sliderSize.X - 16f) * nowPlayingVolume;
+            drawList.AddRectFilled(new Vector2(thumbX, sliderPosition.Y - 2f),
+                new Vector2(thumbX + 16f, sliderPosition.Y + sliderSize.Y + 2f),
+                ImGui.GetColorU32(new Vector4(1f, 0.96f, 1f, 1f)));
+            modeY = topLeft.Y + 178f;
+        }
+
+        var gap = Math.Clamp(size.X * 0.01f, 7f, 8f);
+        var buttonWidths = NowPlayingModes.Select(mode => ImGui.CalcTextSize(mode).X + 28f).ToArray();
+        var modesWidth = buttonWidths.Sum() + gap * (buttonWidths.Length - 1);
+        var modeX = topLeft.X + (size.X - modesWidth) * 0.5f;
+        for (var i = 0; i < NowPlayingModes.Length; i++)
+        {
+            if (DrawPlayerModeButton($"PlayerMode{i}", NowPlayingModes[i],
+                    new Vector2(modeX, modeY),
+                    new Vector2(buttonWidths[i], 32f), nowPlayingModeIndex == i))
+                nowPlayingModeIndex = i;
+            modeX += buttonWidths[i] + gap;
+        }
+    }
+
+    private void DrawPlayerTransportButton(string id, Vector2 position, Vector2 size, string icon)
+    {
+        ImGui.SetCursorScreenPos(position);
+        var clicked = ImGui.InvisibleButton($"##{id}", size);
+        var hovered = ImGui.IsItemHovered();
+        var drawList = ImGui.GetWindowDrawList();
+        if (hovered && !string.IsNullOrEmpty(nowPlayingStatus))
+        {
+            ImGui.BeginTooltip();
+            ImGui.TextUnformatted(nowPlayingStatus);
+            ImGui.EndTooltip();
+        }
+        var ink = ImGui.GetColorU32(new Vector4(1f, 0.96f, 1f, 1f));
+        var shadow = ImGui.GetColorU32(new Vector4(0.36f, 0.23f, 0.56f, 1f));
+        if (hovered)
+            drawList.AddRectFilled(position, position + size,
+                ImGui.GetColorU32(new Vector4(1f, 0.61f, 0.85f, 0.08f)));
+
+        var center = position + size * 0.5f;
+
+        if (icon is "previous" or "next")
+        {
+            var left = icon == "previous";
+            var tipX = center.X + (left ? -7f : 7f);
+            var baseX = center.X + (left ? 7f : -7f);
+            var upperY = center.Y - 9f;
+            var lowerY = center.Y + 9f;
+            var direction = left ? -1f : 1f;
+            drawList.AddTriangleFilled(new Vector2(tipX + direction, upperY + 1f),
+                new Vector2(tipX + direction, lowerY + 1f),
+                new Vector2(baseX + direction, center.Y + 1f), shadow);
+            drawList.AddTriangleFilled(new Vector2(tipX, upperY), new Vector2(tipX, lowerY),
+                new Vector2(baseX, center.Y), ink);
+            if (clicked)
+            {
+                var delta = left ? NowPlayingTrackFiles.Length - 1 : 1;
+                SelectNowPlayingTrack(nowPlayingTrackIndex + delta);
+            }
+        }
+        else if (icon == "pause")
+        {
+            drawList.AddRectFilled(center + new Vector2(-14f, -14f), center + new Vector2(-4f, 14f), shadow);
+            drawList.AddRectFilled(center + new Vector2(2f, -14f), center + new Vector2(12f, 14f), shadow);
+            drawList.AddRectFilled(center + new Vector2(-16f, -14f), center + new Vector2(-6f, 14f), ink);
+            drawList.AddRectFilled(center + new Vector2(0f, -14f), center + new Vector2(10f, 14f), ink);
+            if (clicked)
+            {
+                if (nowPlayingIsLoading)
+                {
+                    nowPlayingRequestId++;
+                    nowPlayingLoadCancellation?.Cancel();
+                    nowPlayingIsLoading = false;
+                    nowPlayingStatus = string.Empty;
+                }
+                else
+                {
+                    nowPlayingIsPlaying = false;
+                    try
+                    {
+                        nowPlayingOutput?.Pause();
+                    }
+                    catch (Exception ex)
+                    {
+                        nowPlayingStatus = $"暂停失败：{ex.Message}";
+                    }
+                    finally
+                    {
+                        RestoreGameBgmVolume();
+                    }
+                }
+            }
+        }
+        else
+        {
+            drawList.AddTriangleFilled(center + new Vector2(-12f, -18f) + new Vector2(2f, 2f),
+                center + new Vector2(-12f, 18f) + new Vector2(2f, 2f),
+                center + new Vector2(16f, 0f) + new Vector2(2f, 2f), shadow);
+            drawList.AddTriangleFilled(center + new Vector2(-14f, -18f), center + new Vector2(-14f, 18f),
+                center + new Vector2(14f, 0f), ink);
+            if (clicked)
+            {
+                if (nowPlayingOutput is not null && nowPlayingOutput.PlaybackState == PlaybackState.Paused)
+                {
+                    try
+                    {
+                        SuppressGameBgm();
+                        nowPlayingOutput.Play();
+                        nowPlayingIsPlaying = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        DisposeNowPlayingPlayback();
+                        nowPlayingIsPlaying = false;
+                        nowPlayingStatus = $"播放失败：{ex.Message}";
+                    }
+                }
+                else if (nowPlayingOutput is null && !nowPlayingIsLoading)
+                {
+                    StartNowPlayingTrack();
+                }
+            }
+        }
+    }
+
+    private static bool DrawPlayerModeButton(string id, string label, Vector2 position, Vector2 size, bool selected)
+    {
+        ImGui.SetCursorScreenPos(position);
+        var clicked = ImGui.InvisibleButton($"##{id}", size);
+        var hovered = ImGui.IsItemHovered();
+        var drawList = ImGui.GetWindowDrawList();
+        var fill = selected
+            ? new Vector4(1f, 0.61f, 0.85f, 0.25f)
+            : hovered ? new Vector4(1f, 1f, 1f, 0.14f) : new Vector4(1f, 1f, 1f, 0.12f);
+        drawList.AddRectFilled(position + new Vector2(3f, 3f), position + size + new Vector2(3f, 3f),
+            ImGui.GetColorU32(new Vector4(0.24f, 0.15f, 0.40f, 0.41f)));
+        drawList.AddRectFilled(position, position + size, ImGui.GetColorU32(fill));
+        drawList.AddRect(position, position + size,
+            ImGui.GetColorU32(selected
+                ? new Vector4(1f, 0.57f, 0.84f, 1f)
+                : new Vector4(0.49f, 0.36f, 0.71f, 1f)),
+            0f, ImDrawFlags.None, 2f);
+        var textSize = ImGui.CalcTextSize(label);
+        var textColor = ImGui.GetColorU32(new Vector4(0.36f, 0.23f, 0.56f, 1f));
+        drawList.AddText(position + new Vector2((size.X - textSize.X) * 0.5f + 2f,
+            (size.Y - textSize.Y) * 0.5f + 2f), textColor, label);
+        drawList.AddText(position + new Vector2((size.X - textSize.X) * 0.5f, (size.Y - textSize.Y) * 0.5f),
+            ImGui.GetColorU32(new Vector4(1f, 0.96f, 1f, 1f)), label);
+        return clicked;
+    }
+
+    private void SelectNowPlayingTrack(int trackIndex)
+    {
+        nowPlayingTrackIndex = (trackIndex + NowPlayingTrackFiles.Length) % NowPlayingTrackFiles.Length;
+        StartNowPlayingTrack();
+    }
+
+    private void StartNowPlayingTrack()
+    {
+        if (nowPlayingDisposed)
+            return;
+
+        var requestId = ++nowPlayingRequestId;
+        nowPlayingLoadCancellation?.Cancel();
+        var cancellation = new CancellationTokenSource();
+        nowPlayingLoadCancellation = cancellation;
+        DisposeNowPlayingPlayback();
+        nowPlayingIsPlaying = false;
+        nowPlayingIsLoading = true;
+        nowPlayingStatus = File.Exists(GetNowPlayingCachePath(NowPlayingTrackFiles[nowPlayingTrackIndex]))
+            ? "正在读取本地歌曲缓存..."
+            : "正在下载并缓存歌曲...";
+        _ = LoadNowPlayingTrackAsync(nowPlayingTrackIndex, requestId, cancellation);
+    }
+
+    private async Task LoadNowPlayingTrackAsync(int trackIndex, int requestId, CancellationTokenSource cancellation)
+    {
+        var cancellationToken = cancellation.Token;
+        try
+        {
+            var fileName = NowPlayingTrackFiles[trackIndex];
+            var url = "https://fleet-snowfluff.makuraly.xyz/music/" + Uri.EscapeDataString(fileName);
+            var cachePath = await CacheNowPlayingTrackAsync(url, fileName, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            var playback = await Task.Run(() =>
+            {
+                var reader = new MediaFoundationReader(cachePath);
+                try
+                {
+                    var output = new WaveOutEvent();
+                    output.Init(reader);
+                    return (Reader: reader, Output: output);
+                }
+                catch
+                {
+                    reader.Dispose();
+                    throw;
+                }
+            }, cancellationToken);
+
+            await framework.RunOnFrameworkThread(() =>
+            {
+                if (nowPlayingDisposed || requestId != nowPlayingRequestId)
+                {
+                    playback.Output.Dispose();
+                    playback.Reader.Dispose();
+                    return;
+                }
+
+                nowPlayingReader = playback.Reader;
+                nowPlayingOutput = playback.Output;
+                nowPlayingOutput.Volume = nowPlayingVolume;
+                nowPlayingStoppedHandler = (_, args) =>
+                {
+                    _ = framework.RunOnFrameworkThread(() => HandleNowPlayingStopped(requestId, args));
+                };
+                nowPlayingOutput.PlaybackStopped += nowPlayingStoppedHandler;
+                SuppressGameBgm();
+                nowPlayingOutput.Play();
+                nowPlayingIsLoading = false;
+                nowPlayingIsPlaying = true;
+                nowPlayingStatus = string.Empty;
+            });
+        }
+        catch (Exception ex)
+        {
+            await framework.RunOnFrameworkThread(() =>
+            {
+                if (requestId != nowPlayingRequestId || nowPlayingDisposed)
+                    return;
+
+                DisposeNowPlayingPlayback();
+                nowPlayingIsLoading = false;
+                nowPlayingIsPlaying = false;
+                nowPlayingStatus = $"播放失败：{ex.Message}";
+            });
+        }
+        finally
+        {
+            try
+            {
+                await framework.RunOnFrameworkThread(() =>
+                {
+                    if (ReferenceEquals(nowPlayingLoadCancellation, cancellation))
+                        nowPlayingLoadCancellation = null;
+                });
+            }
+            catch
+            {
+            }
+
+            cancellation.Dispose();
+        }
+    }
+
+    private async Task<string> CacheNowPlayingTrackAsync(string url, string fileName, CancellationToken cancellationToken)
+    {
+        var cachePath = GetNowPlayingCachePath(fileName);
+        if (File.Exists(cachePath) && new FileInfo(cachePath).Length > 0)
+            return cachePath;
+
+        var cacheDirectory = Path.GetDirectoryName(cachePath)!;
+        Directory.CreateDirectory(cacheDirectory);
+        var temporaryPath = cachePath + "." + Guid.NewGuid().ToString("N") + ".download";
+        try
+        {
+            using var response = await NowPlayingHttpClient.GetAsync(
+                url,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
+            response.EnsureSuccessStatusCode();
+            await using (var source = await response.Content.ReadAsStreamAsync(cancellationToken))
+            await using (var destination = new FileStream(
+                             temporaryPath,
+                             FileMode.CreateNew,
+                             FileAccess.Write,
+                             FileShare.None,
+                             81920,
+                             FileOptions.Asynchronous | FileOptions.SequentialScan))
+            {
+                await source.CopyToAsync(destination, cancellationToken);
+                await destination.FlushAsync(cancellationToken);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            File.Move(temporaryPath, cachePath, true);
+            return cachePath;
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+                File.Delete(temporaryPath);
+        }
+    }
+
+    private string GetNowPlayingCachePath(string fileName)
+    {
+        var pluginDirectory = pluginInterface.AssemblyLocation.DirectoryName ?? AppContext.BaseDirectory;
+        return Path.Combine(pluginDirectory, "Resources", "FleetSnowfluff", "AudioCache", fileName);
+    }
+
+    private void HandleNowPlayingStopped(int requestId, StoppedEventArgs args)
+    {
+        if (nowPlayingDisposed || requestId != nowPlayingRequestId)
+            return;
+
+        var reachedEnd = false;
+        try
+        {
+            reachedEnd = args.Exception is null && nowPlayingReader is not null &&
+                nowPlayingReader.TotalTime - nowPlayingReader.CurrentTime <= TimeSpan.FromSeconds(1);
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+
+        DisposeNowPlayingPlayback();
+        nowPlayingRequestId++;
+        nowPlayingIsPlaying = false;
+        nowPlayingIsLoading = false;
+        if (!reachedEnd)
+        {
+            if (args.Exception is not null)
+                nowPlayingStatus = $"播放失败：{args.Exception.Message}";
+            return;
+        }
+
+        switch (nowPlayingModeIndex)
+        {
+            case 0:
+                if (nowPlayingTrackIndex + 1 < NowPlayingTrackFiles.Length)
+                {
+                    nowPlayingTrackIndex++;
+                    StartNowPlayingTrack();
+                }
+                break;
+            case 1:
+                nowPlayingTrackIndex = (nowPlayingTrackIndex + 1) % NowPlayingTrackFiles.Length;
+                StartNowPlayingTrack();
+                break;
+            case 2:
+                StartNowPlayingTrack();
+                break;
+            case 3:
+                var nextTrack = Random.Shared.Next(NowPlayingTrackFiles.Length - 1);
+                if (nextTrack >= nowPlayingTrackIndex)
+                    nextTrack++;
+                nowPlayingTrackIndex = nextTrack;
+                StartNowPlayingTrack();
+                break;
+        }
+    }
+
+    private void DisposeNowPlayingPlayback()
+    {
+        RestoreGameBgmVolume();
+        var output = nowPlayingOutput;
+        nowPlayingOutput = null;
+        if (output is not null)
+        {
+            if (nowPlayingStoppedHandler is not null)
+                output.PlaybackStopped -= nowPlayingStoppedHandler;
+            try
+            {
+                output.Stop();
+            }
+            catch
+            {
+            }
+            output.Dispose();
+        }
+
+        nowPlayingStoppedHandler = null;
+        nowPlayingReader?.Dispose();
+        nowPlayingReader = null;
+    }
+
+    private void SuppressGameBgm()
+    {
+        if (gameBgmSuppressed)
+            return;
+
+        try
+        {
+            if (!gameConfig.TryGet(SystemConfigOption.SoundBgm, out uint currentVolume))
+                return;
+
+            savedGameBgmVolume = currentVolume;
+            gameConfig.Set(SystemConfigOption.SoundBgm, 0u);
+            gameBgmSuppressed = true;
+        }
+        catch
+        {
+        }
+    }
+
+    private void RestoreGameBgmVolume()
+    {
+        if (!gameBgmSuppressed)
+            return;
+
+        try
+        {
+            gameConfig.Set(SystemConfigOption.SoundBgm, savedGameBgmVolume);
+            gameBgmSuppressed = false;
+        }
+        catch
+        {
+        }
+    }
+
+    private static void DrawPixelCassette(ImDrawListPtr drawList, Vector2 position, Vector2 size, float time)
+    {
+        var body = new Vector4(1f, 0.95f, 0.82f, 1f);
+        var bodyInset = new Vector4(1f, 0.98f, 0.90f, 1f);
+        var gold = new Vector4(0.87f, 0.66f, 0.28f, 1f);
+        var goldLight = new Vector4(1f, 0.88f, 0.55f, 1f);
+        var dark = new Vector4(0.24f, 0.16f, 0.34f, 1f);
+        var shadow = position + new Vector2(3f, 3f);
+        drawList.AddRectFilled(shadow, shadow + size,
+            ImGui.GetColorU32(new Vector4(0.20f, 0.13f, 0.33f, 0.72f)));
+        drawList.AddRectFilled(position, position + size, ImGui.GetColorU32(body));
+        drawList.AddRect(position, position + size, ImGui.GetColorU32(gold), 0f, ImDrawFlags.None, 2f);
+        drawList.AddRect(position + new Vector2(4f, 4f), position + size - new Vector2(4f, 4f),
+            ImGui.GetColorU32(bodyInset), 0f, ImDrawFlags.None, 1f);
+
+        for (var x = 15f; x < size.X - 15f; x += 8f)
+        {
+            var stripeColor = ImGui.GetColorU32(((int)x / 8) % 2 == 0
+                ? goldLight
+                : new Vector4(0.97f, 0.88f, 0.68f, 1f));
+            var stripeX = position.X + x;
+            drawList.AddRectFilled(new Vector2(stripeX, position.Y + 14f),
+                new Vector2(stripeX + 4f, position.Y + 23f), stripeColor);
+            drawList.AddRectFilled(new Vector2(stripeX, position.Y + 111f),
+                new Vector2(stripeX + 4f, position.Y + 120f), stripeColor);
+        }
+        drawList.AddRect(position + new Vector2(12f, 10f), position + new Vector2(size.X - 12f, 26f),
+            ImGui.GetColorU32(gold), 0f, ImDrawFlags.None, 1.5f);
+        drawList.AddRect(position + new Vector2(25f, 106f), position + new Vector2(size.X - 25f, 122f),
+            ImGui.GetColorU32(gold), 0f, ImDrawFlags.None, 1.5f);
+
+        var windowMin = position + new Vector2(20f, 36f);
+        var windowMax = position + new Vector2(size.X - 20f, 93f);
+        drawList.AddRectFilled(windowMin, windowMax, ImGui.GetColorU32(dark));
+        drawList.AddRect(windowMin, windowMax, ImGui.GetColorU32(gold), 0f, ImDrawFlags.None, 2f);
+        drawList.AddRect(windowMin + new Vector2(2f, 2f), windowMax - new Vector2(2f, 2f),
+            ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 0.22f)));
+
+        var reelY = position.Y + 64.5f;
+        var leftReel = new Vector2(position.X + 54f, reelY);
+        var rightReel = new Vector2(position.X + size.X - 54f, reelY);
+        DrawCassetteReel(drawList, leftReel, 16f, time);
+        DrawCassetteReel(drawList, rightReel, 16f, -time * 0.87f);
+        drawList.AddLine(leftReel + new Vector2(15f, 0f),
+            new Vector2(position.X + 88f, reelY), ImGui.GetColorU32(goldLight), 3f);
+        drawList.AddLine(new Vector2(position.X + size.X - 88f, reelY),
+            rightReel - new Vector2(15f, 0f), ImGui.GetColorU32(goldLight), 3f);
+        var hubMin = position + new Vector2(92f, 46f);
+        var hubMax = position + new Vector2(113f, 83f);
+        drawList.AddRectFilled(hubMin, hubMax, ImGui.GetColorU32(new Vector4(0.16f, 0.11f, 0.25f, 1f)));
+        drawList.AddRect(hubMin, hubMax, ImGui.GetColorU32(goldLight), 0f, ImDrawFlags.None, 1f);
+        drawList.AddLine(new Vector2(position.X + 67f, reelY), new Vector2(hubMin.X, reelY),
+            ImGui.GetColorU32(goldLight), 2f);
+        drawList.AddLine(new Vector2(hubMax.X, reelY), new Vector2(position.X + 138f, reelY),
+            ImGui.GetColorU32(goldLight), 2f);
+
+        foreach (var screw in new[]
+                 {
+                     position + new Vector2(11f, 11f), position + new Vector2(size.X - 11f, 11f),
+                     position + new Vector2(11f, size.Y - 11f), position + new Vector2(size.X - 11f, size.Y - 11f),
+                 })
+            drawList.AddCircleFilled(screw, 1.8f, ImGui.GetColorU32(new Vector4(0.56f, 0.37f, 0.12f, 1f)), 8);
+    }
+
+    private static void DrawCassetteReel(ImDrawListPtr drawList, Vector2 center, float radius, float angle)
+    {
+        drawList.AddCircleFilled(center, radius, ImGui.GetColorU32(new Vector4(1f, 0.88f, 0.55f, 1f)), 24);
+        drawList.AddCircle(center, radius - 1f, ImGui.GetColorU32(new Vector4(0.69f, 0.48f, 0.18f, 1f)), 24, 1f);
+        for (var spoke = 0; spoke < 8; spoke++)
+        {
+            var radians = angle + spoke * MathF.PI / 4f;
+            var inner = center + new Vector2(MathF.Cos(radians), MathF.Sin(radians)) * 4f;
+            var outer = center + new Vector2(MathF.Cos(radians), MathF.Sin(radians)) * 12f;
+            drawList.AddLine(inner, outer, ImGui.GetColorU32(new Vector4(0.72f, 0.48f, 0.17f, 0.92f)), 1f);
+        }
+        drawList.AddCircleFilled(center, 4f, ImGui.GetColorU32(new Vector4(0.28f, 0.19f, 0.35f, 1f)), 16);
+        drawList.AddCircle(center, 4f, ImGui.GetColorU32(new Vector4(1f, 0.91f, 0.64f, 1f)), 16, 1f);
+    }
+
     private void DrawAemeathHero()
     {
-        var size = new Vector2(-1, 42);
+        var size = new Vector2(-1, 54);
         if (!ImGui.BeginChild("AemeathHero", size, false, ImGuiWindowFlags.NoScrollbar))
         {
             ImGui.EndChild();
@@ -950,7 +1695,45 @@ public sealed class MainWindow
         }
 
         var windowSize = ImGui.GetWindowSize();
-        ImGui.SetCursorPos(new Vector2(Math.Max(420f, windowSize.X - 252f), 10f));
+        var drawList = ImGui.GetWindowDrawList();
+        var origin = ImGui.GetWindowPos();
+        var playerTop = origin + new Vector2(2f, 6f);
+        var playerWidth = Math.Max(360f, windowSize.X - 280f);
+        var playerSize = new Vector2(playerWidth, 40f);
+        drawList.AddRectFilled(playerTop, playerTop + playerSize,
+            ImGui.GetColorU32(new Vector4(0.94f, 0.83f, 0.98f, 0.54f)), 7f);
+        drawList.AddRect(playerTop, playerTop + playerSize,
+            ImGui.GetColorU32(new Vector4(1.00f, 0.77f, 0.91f, 0.78f)), 7f,
+            ImDrawFlags.RoundCornersAll, 1f);
+
+        var spectrumMin = playerTop + new Vector2(7f, 5f);
+        var spectrumMax = spectrumMin + new Vector2(82f, 30f);
+        drawList.AddRectFilled(spectrumMin, spectrumMax,
+            ImGui.GetColorU32(new Vector4(0.44f, 0.29f, 0.65f, 0.34f)), 4f);
+        var spectrumTime = (float)ImGui.GetTime();
+        for (var i = 0; i < 18; i++)
+        {
+            var barHeight = 3f + (MathF.Sin(spectrumTime * 3.1f + i * 0.83f) * 0.5f + 0.5f) * 19f;
+            var x = spectrumMin.X + 5f + i * 4f;
+            drawList.AddRectFilled(new Vector2(x, spectrumMax.Y - 3f - barHeight),
+                new Vector2(x + 2f, spectrumMax.Y - 3f),
+                ImGui.GetColorU32(i % 3 == 0 ? AemeathCyan : AemeathPink), 1f);
+        }
+
+        var titleLeft = spectrumMax.X + 9f;
+        var controlsLeft = playerTop.X + playerSize.X - 132f;
+        drawList.PushClipRect(new Vector2(titleLeft, playerTop.Y),
+            new Vector2(controlsLeft - 6f, playerTop.Y + playerSize.Y), true);
+        drawList.AddText(new Vector2(titleLeft, playerTop.Y + 12f),
+            ImGui.GetColorU32(AemeathBodyInk), MiniPlayerTracks[miniPlayerTrackIndex]);
+        drawList.PopClipRect();
+
+        DrawMiniPlayerButton("MiniPrev", new Vector2(controlsLeft, playerTop.Y + 7f), "prev");
+        DrawMiniPlayerButton("MiniPlay", new Vector2(controlsLeft + 31f, playerTop.Y + 7f), "play");
+        DrawMiniPlayerButton("MiniNext", new Vector2(controlsLeft + 62f, playerTop.Y + 7f), "next");
+        DrawMiniPlayerButton("MiniTrack", new Vector2(controlsLeft + 93f, playerTop.Y + 7f), "list");
+
+        ImGui.SetCursorPos(new Vector2(Math.Max(420f, windowSize.X - 252f), 13f));
         DrawStatusPill("系统", plugin.IsAutoTreasureHuntEnabled ? AemeathCyan : AemeathGold,
             plugin.IsAutoTreasureHuntEnabled ? "运行中" : "待机");
         ImGui.SameLine();
@@ -1007,6 +1790,97 @@ public sealed class MainWindow
             plugin.IsCredentialValidated ? plugin.CredentialRoleName : "LOCKED");
         ImGui.EndChild();
 #endif
+    }
+
+    private void DrawMiniPlayerButton(string id, Vector2 position, string icon)
+    {
+        ImGui.SetCursorScreenPos(position);
+        var clicked = ImGui.InvisibleButton($"##{id}", new Vector2(25f, 25f));
+        var hovered = ImGui.IsItemHovered();
+        var drawList = ImGui.GetWindowDrawList();
+        var min = position;
+        var max = min + new Vector2(25f, 25f);
+        drawList.AddRectFilled(min, max,
+            ImGui.GetColorU32(hovered
+                ? new Vector4(0.91f, 0.50f, 0.74f, 0.96f)
+                : new Vector4(0.61f, 0.45f, 0.75f, 0.82f)), 4f);
+
+        var centerY = min.Y + 12.5f;
+        var ink = ImGui.GetColorU32(Vector4.One);
+        switch (icon)
+        {
+            case "play":
+                drawList.AddTriangleFilled(new Vector2(min.X + 9f, min.Y + 6f),
+                    new Vector2(min.X + 9f, min.Y + 19f), new Vector2(min.X + 19f, centerY), ink);
+                if (clicked)
+                    OpenMiniPlayerTrack();
+                DrawMiniPlayerTooltip("在浏览器中播放所选曲目");
+                break;
+            case "prev":
+                drawList.AddRectFilled(new Vector2(min.X + 6f, min.Y + 7f), new Vector2(min.X + 8f, min.Y + 18f), ink);
+                drawList.AddTriangleFilled(new Vector2(min.X + 18f, min.Y + 6f),
+                    new Vector2(min.X + 18f, min.Y + 19f), new Vector2(min.X + 8f, centerY), ink);
+                if (clicked)
+                    miniPlayerTrackIndex = (miniPlayerTrackIndex + MiniPlayerTracks.Length - 1) % MiniPlayerTracks.Length;
+                DrawMiniPlayerTooltip("上一首");
+                break;
+            case "next":
+                drawList.AddRectFilled(new Vector2(min.X + 17f, min.Y + 7f), new Vector2(min.X + 19f, min.Y + 18f), ink);
+                drawList.AddTriangleFilled(new Vector2(min.X + 7f, min.Y + 6f),
+                    new Vector2(min.X + 7f, min.Y + 19f), new Vector2(min.X + 17f, centerY), ink);
+                if (clicked)
+                    miniPlayerTrackIndex = (miniPlayerTrackIndex + 1) % MiniPlayerTracks.Length;
+                DrawMiniPlayerTooltip("下一首");
+                break;
+            case "list":
+                for (var i = 0; i < 3; i++)
+                {
+                    var y = min.Y + 7f + i * 5f;
+                    drawList.AddRectFilled(new Vector2(min.X + 6f, y), new Vector2(min.X + 9f, y + 2f), ink);
+                    drawList.AddRectFilled(new Vector2(min.X + 12f, y), new Vector2(min.X + 19f, y + 2f), ink);
+                }
+                if (clicked)
+                    ImGui.OpenPopup("MiniPlayerPlaylist");
+                DrawMiniPlayerTooltip("播放列表");
+                break;
+        }
+
+        if (ImGui.BeginPopup("MiniPlayerPlaylist"))
+        {
+            for (var i = 0; i < MiniPlayerTracks.Length; i++)
+            {
+                if (ImGui.Selectable(MiniPlayerTracks[i], miniPlayerTrackIndex == i))
+                    miniPlayerTrackIndex = i;
+            }
+            ImGui.EndPopup();
+        }
+    }
+
+    private static void DrawMiniPlayerTooltip(string text)
+    {
+        if (!ImGui.IsItemHovered())
+            return;
+
+        ImGui.BeginTooltip();
+        ImGui.TextUnformatted(text);
+        ImGui.EndTooltip();
+    }
+
+    private void OpenMiniPlayerTrack()
+    {
+        const string baseUrl = "https://fleet-snowfluff.makuraly.xyz/music/";
+        var fileName = MiniPlayerTrackFiles[miniPlayerTrackIndex];
+        var url = baseUrl + Uri.EscapeDataString(fileName);
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url)
+            {
+                UseShellExecute = true,
+            });
+        }
+        catch
+        {
+        }
     }
 
     private void DrawSealOnPage()
@@ -1087,25 +1961,29 @@ public sealed class MainWindow
 
         var drawList = ImGui.GetWindowDrawList();
         var fill = selected
-            ? new Vector4(0.76f, 0.25f, 0.53f, 0.76f)
+            ? new Vector4(0.79f, 0.29f, 0.58f, 0.90f)
             : hovered
-                ? new Vector4(0.10f, 0.35f, 0.43f, 0.84f)
-                : new Vector4(0.04f, 0.10f, 0.24f, enabled ? 0.78f : 0.46f);
+                ? new Vector4(0.70f, 0.52f, 0.76f, 0.62f)
+                : new Vector4(0.68f, 0.56f, 0.79f, enabled ? 0.40f : 0.24f);
         if (active)
-            fill = new Vector4(0.95f, 0.39f, 0.65f, 0.84f);
-        drawList.AddRectFilled(topLeft, topLeft + size, ImGui.GetColorU32(fill), 7f);
+            fill = new Vector4(0.91f, 0.43f, 0.70f, 0.96f);
+        drawList.AddRectFilled(topLeft + new Vector2(3f, 3f), topLeft + size + new Vector2(3f, 3f),
+            ImGui.GetColorU32(new Vector4(0.25f, 0.17f, 0.40f, enabled ? 0.20f : 0.10f)));
+        drawList.AddRectFilled(topLeft, topLeft + size, ImGui.GetColorU32(fill), 3f);
         drawList.AddRect(topLeft, topLeft + size,
             ImGui.GetColorU32(selected
-                ? new Vector4(0.95f, 0.39f, 0.65f, 0.82f)
-                : new Vector4(0.29f, 0.89f, 0.88f, enabled ? 0.32f : 0.16f)),
-            7f,
+                ? new Vector4(1.00f, 0.76f, 0.90f, 0.94f)
+                : new Vector4(0.88f, 0.75f, 0.96f, enabled ? 0.62f : 0.28f)),
+            3f,
             ImDrawFlags.RoundCornersAll,
-            1f);
+            1.5f);
         if (selected)
             drawList.AddRectFilled(topLeft, topLeft + new Vector2(3f, size.Y),
                 ImGui.GetColorU32(AemeathPink), 2f);
 
-        var textColor = enabled ? AemeathInk : AemeathMuted;
+        var textColor = selected
+            ? AemeathInk
+            : enabled ? AemeathBodyInk : AemeathBodyMuted;
         var labelY = string.IsNullOrEmpty(subtitle) ? (size.Y - ImGui.GetTextLineHeight()) * 0.5f : 7f;
         drawList.AddText(topLeft + new Vector2(14f, labelY), ImGui.GetColorU32(textColor), label);
         if (!string.IsNullOrEmpty(subtitle))
@@ -1131,21 +2009,26 @@ public sealed class MainWindow
         ImGui.EndDisabled();
 
         var fill = !enabled
-            ? new Vector4(0.05f, 0.08f, 0.18f, 0.46f)
+            ? new Vector4(0.30f, 0.25f, 0.42f, 0.42f)
             : active
-                ? new Vector4(0.95f, 0.39f, 0.65f, 0.74f)
+                ? new Vector4(0.91f, 0.43f, 0.70f, 0.96f)
                 : hovered
-                    ? new Vector4(0.10f, 0.35f, 0.43f, 0.86f)
+                    ? new Vector4(0.55f, 0.37f, 0.68f, 0.92f)
                     : accent
-                        ? new Vector4(0.76f, 0.25f, 0.53f, 0.76f)
-                        : new Vector4(0.04f, 0.10f, 0.24f, 0.78f);
+                        ? new Vector4(0.78f, 0.30f, 0.59f, 0.90f)
+                        : new Vector4(0.34f, 0.25f, 0.54f, 0.84f);
         var border = accent || active
-            ? new Vector4(0.82f, 0.28f, 0.52f, 0.62f)
-            : new Vector4(0.07f, 0.57f, 0.68f, enabled ? 0.34f : 0.14f);
+            ? new Vector4(1.00f, 0.74f, 0.89f, 0.92f)
+            : new Vector4(0.91f, 0.76f, 0.96f, enabled ? 0.72f : 0.30f);
         var drawList = ImGui.GetWindowDrawList();
-        drawList.AddRectFilled(topLeft, topLeft + size, ImGui.GetColorU32(fill), 6f);
-        drawList.AddRect(topLeft, topLeft + size, ImGui.GetColorU32(border), 6f,
-            ImDrawFlags.RoundCornersAll, 1f);
+        drawList.AddRectFilled(topLeft + new Vector2(3f, 3f), topLeft + size + new Vector2(3f, 3f),
+            ImGui.GetColorU32(new Vector4(0.25f, 0.17f, 0.40f, enabled ? 0.50f : 0.22f)));
+        drawList.AddRectFilled(topLeft, topLeft + size, ImGui.GetColorU32(fill), 3f);
+        drawList.AddRect(topLeft, topLeft + size, ImGui.GetColorU32(border), 3f,
+            ImDrawFlags.RoundCornersAll, 1.5f);
+        drawList.AddRectFilled(topLeft + new Vector2(5f, 3f),
+            new Vector2(topLeft.X + size.X - 5f, topLeft.Y + 4f),
+            ImGui.GetColorU32(new Vector4(1.00f, 0.88f, 0.96f, enabled ? 0.24f : 0.10f)));
         drawList.AddText(topLeft + new Vector2(12f, Math.Max(4f, (size.Y - ImGui.GetTextLineHeight()) * 0.5f)),
             ImGui.GetColorU32(enabled ? AemeathInk : AemeathMuted), label);
         return clicked;
@@ -1166,20 +2049,20 @@ public sealed class MainWindow
         var trackMin = topLeft + new Vector2(2f, 5f);
         var trackMax = trackMin + new Vector2(38f, 18f);
         var trackColor = !enabled
-            ? new Vector4(0.08f, 0.12f, 0.24f, 0.40f)
+            ? new Vector4(0.34f, 0.29f, 0.47f, 0.42f)
             : value
-                ? new Vector4(0.95f, 0.39f, 0.65f, 0.82f)
-                : new Vector4(0.08f, 0.29f, 0.38f, 0.72f);
+                ? new Vector4(0.91f, 0.43f, 0.70f, 0.92f)
+                : new Vector4(0.43f, 0.32f, 0.64f, 0.76f);
         drawList.AddRectFilled(trackMin, trackMax, ImGui.GetColorU32(trackColor), 9f);
         drawList.AddRect(trackMin, trackMax,
-            ImGui.GetColorU32(new Vector4(0.29f, 0.89f, 0.88f, enabled ? 0.46f : 0.18f)),
+            ImGui.GetColorU32(new Vector4(1.00f, 0.78f, 0.91f, enabled ? 0.72f : 0.28f)),
             9f,
             ImDrawFlags.RoundCornersAll,
             1f);
         var knob = trackMin + new Vector2(value ? 29f : 9f, 9f);
-        drawList.AddCircleFilled(knob, 6f, ImGui.GetColorU32(value ? AemeathCyan : AemeathMuted));
+        drawList.AddCircleFilled(knob, 6f, ImGui.GetColorU32(value ? SitePixelBorder : AemeathMuted));
         drawList.AddText(topLeft + new Vector2(52f, 5f),
-            ImGui.GetColorU32(enabled ? AemeathInk : AemeathMuted), label);
+            ImGui.GetColorU32(enabled ? AemeathBodyInk : AemeathBodyMuted), label);
         return clicked;
     }
 
@@ -1193,11 +2076,11 @@ public sealed class MainWindow
         var drawList = ImGui.GetWindowDrawList();
         var center = topLeft + new Vector2(10f, 13f);
         drawList.AddCircle(center, 8f,
-            ImGui.GetColorU32(new Vector4(0.07f, 0.57f, 0.68f, enabled ? 0.52f : 0.20f)), 20, 1.2f);
+            ImGui.GetColorU32(new Vector4(1.00f, 0.78f, 0.91f, enabled ? 0.72f : 0.28f)), 20, 1.2f);
         if (selected)
             drawList.AddCircleFilled(center, 4.5f, ImGui.GetColorU32(AemeathPink));
         drawList.AddText(topLeft + new Vector2(24f, 5f),
-            ImGui.GetColorU32(enabled ? AemeathInk : AemeathMuted), label);
+            ImGui.GetColorU32(enabled ? AemeathBodyInk : AemeathBodyMuted), label);
         return clicked && enabled;
     }
 
@@ -1208,21 +2091,21 @@ public sealed class MainWindow
             topLeft,
             topLeft + size,
             ImGui.GetColorU32(enabled
-                ? new Vector4(0.04f, 0.12f, 0.27f, 0.86f)
-                : new Vector4(0.04f, 0.08f, 0.18f, 0.46f)),
-            7f);
+                ? new Vector4(0.28f, 0.21f, 0.46f, 0.88f)
+                : new Vector4(0.30f, 0.25f, 0.42f, 0.44f)),
+            3f);
         drawList.AddRect(
             topLeft,
             topLeft + size,
-            ImGui.GetColorU32(new Vector4(0.29f, 0.89f, 0.88f, enabled ? 0.46f : 0.18f)),
-            7f,
+            ImGui.GetColorU32(new Vector4(1.00f, 0.78f, 0.91f, enabled ? 0.72f : 0.30f)),
+            3f,
             ImDrawFlags.RoundCornersAll,
             1f);
         drawList.AddLine(
             topLeft + new Vector2(10f, size.Y - 2f),
             new Vector2(topLeft.X + Math.Min(size.X - 10f, 80f), topLeft.Y + size.Y - 2f),
-            ImGui.GetColorU32(new Vector4(0.82f, 0.28f, 0.52f, enabled ? 0.55f : 0.20f)),
-            1f);
+            ImGui.GetColorU32(new Vector4(1.00f, 0.66f, 0.85f, enabled ? 0.76f : 0.28f)),
+            2f);
     }
 
     private static bool DrawAemeathSlider(string id, string label, ref float value, float minimum, float maximum,
@@ -1259,7 +2142,7 @@ public sealed class MainWindow
         drawList.AddCircleFilled(new Vector2(trackMin.X + (trackMax.X - trackMin.X) * ratioValue, 20.5f + topLeft.Y),
             5f, ImGui.GetColorU32(enabled ? AemeathCyan : AemeathMuted));
         drawList.AddText(topLeft + new Vector2(10f, 2f),
-            ImGui.GetColorU32(enabled ? AemeathInk : AemeathMuted),
+            ImGui.GetColorU32(enabled ? AemeathBodyInk : AemeathBodyMuted),
             $"{label}  {value.ToString(format, CultureInfo.InvariantCulture)}");
         return changed;
     }
@@ -1301,7 +2184,11 @@ public sealed class MainWindow
     {
         ImGui.TextDisabled(label);
         ImGui.SameLine(0, 4);
-        ImGui.TextColored(color, $"[{value}]");
+        var textColor = color == AemeathCyan ? AemeathTextCyan
+            : color == AemeathGold ? AemeathTextGold
+            : color == AemeathPink ? AemeathTextPink
+            : color;
+        ImGui.TextColored(textColor, $"[{value}]");
     }
 
     private void DrawCredentialPage()
@@ -1335,10 +2222,12 @@ public sealed class MainWindow
         DrawAemeathInputShell(credentialInputTopLeft,
             new Vector2(ImGui.GetContentRegionAvail().X, 32f));
         ImGui.SetNextItemWidth(-1);
+        ImGui.PushStyleColor(ImGuiCol.Text, AemeathInk);
         if (ImGui.InputText("###Credential", ref credentialInput, 128, ImGuiInputTextFlags.Password | ImGuiInputTextFlags.EnterReturnsTrue))
         {
             ValidateCredentialInput();
         }
+        ImGui.PopStyleColor();
 
         if (DrawAemeathButton("CredentialSubmit", "连接授权", new Vector2(150f, 34f), !credentialValidationInProgress, true))
         {
@@ -1427,8 +2316,10 @@ public sealed class MainWindow
         DrawAemeathInputShell(priceInputTopLeft,
             new Vector2(Math.Min(560f, ImGui.GetContentRegionAvail().X), 30f), maxUnitPriceEnabled);
         ImGui.BeginDisabled(!maxUnitPriceEnabled);
+        ImGui.PushStyleColor(ImGuiCol.Text, AemeathInk);
         ImGui.InputText("补图最高单价", ref mapSupplementMaxUnitPriceInput, 32,
             ImGuiInputTextFlags.CharsDecimal | ImGuiInputTextFlags.EnterReturnsTrue);
+        ImGui.PopStyleColor();
         ImGui.EndDisabled();
         if (ImGui.IsItemDeactivatedAfterEdit() || ImGui.IsItemDeactivated())
         {
@@ -1492,7 +2383,7 @@ public sealed class MainWindow
 
     private void DrawPageHeading(string eyebrow, string title, string subtitle)
     {
-        ImGui.TextColored(AemeathInk, title);
+        ImGui.TextColored(AemeathBodyInk, title);
         ImGui.SameLine();
         ImGui.TextDisabled(subtitle);
         ImGui.Separator();
@@ -1534,7 +2425,7 @@ public sealed class MainWindow
 
     private static void DrawStatusPanel(string title, string subtitle, string status, Vector4 accent)
     {
-        ImGui.TextColored(accent, $"◆ {title}");
+        ImGui.TextColored(accent == AemeathCyan ? AemeathTextCyan : AemeathTextPink, $"◆ {title}");
         ImGui.SameLine();
         ImGui.TextDisabled(subtitle);
         ImGui.TextWrapped(status);
@@ -1550,7 +2441,7 @@ public sealed class MainWindow
         var allReady = plugin.IsVnavmeshRunning &&
                        plugin.IsBossModRebornRunning;
         ImGui.TextColored(
-            allReady ? AemeathCyan : AemeathPink,
+            allReady ? AemeathTextCyan : AemeathTextPink,
             allReady ? "● 运行环境已就绪" : "○ 运行环境尚未就绪");
 
         if (!allReady && DrawAemeathButton("OpenInstaller", "打开插件安装器", new Vector2(164f, 30f), true, false))
@@ -1621,7 +2512,7 @@ public sealed class MainWindow
     private void DrawTestPage()
     {
         DrawPageHeading("DEVELOPER CONSOLE", "测试面板", "诊断 VFX、BaseID、门消息与传送流程");
-        ImGui.TextColored(AemeathPink, "动画锁测试");
+        ImGui.TextColored(AemeathTextPink, "动画锁测试");
         var animationLockEnabled = plugin.AnimationLockOverrideEnabled;
         var animationLockMilliseconds = plugin.AnimationLockOverrideMilliseconds;
         var animationLockChanged = DrawAemeathToggle("AnimationLock", "启用动画锁覆盖", ref animationLockEnabled);
@@ -1931,11 +2822,16 @@ public sealed class MainWindow
             treasureMapSelectorOpen = !treasureMapSelectorOpen;
 
         var drawList = ImGui.GetWindowDrawList();
+        drawList.AddRectFilled(topLeft + new Vector2(3f, 3f),
+            topLeft + new Vector2(width + 3f, height + 3f),
+            ImGui.GetColorU32(new Vector4(0.25f, 0.17f, 0.40f, 0.50f)));
         drawList.AddRectFilled(topLeft, topLeft + new Vector2(width, height),
-            ImGui.GetColorU32(new Vector4(0.05f, 0.15f, 0.30f, treasureMapSelectorOpen ? 0.94f : 0.84f)), 7f);
+            ImGui.GetColorU32(treasureMapSelectorOpen
+                ? new Vector4(0.55f, 0.34f, 0.65f, 0.94f)
+                : new Vector4(0.32f, 0.24f, 0.51f, 0.88f)), 3f);
         drawList.AddRect(topLeft, topLeft + new Vector2(width, height),
-            ImGui.GetColorU32(new Vector4(0.29f, 0.89f, 0.88f, treasureMapSelectorOpen ? 0.70f : 0.42f)),
-            7f, ImDrawFlags.RoundCornersAll, 1f);
+            ImGui.GetColorU32(new Vector4(1.00f, 0.78f, 0.91f, treasureMapSelectorOpen ? 0.94f : 0.72f)),
+            3f, ImDrawFlags.RoundCornersAll, 1.5f);
         drawList.AddText(topLeft + new Vector2(12f, 8f), ImGui.GetColorU32(AemeathInk),
             plugin.SelectedTreasureMapName);
         var arrowCenter = topLeft + new Vector2(width - 18f, height * 0.5f);
@@ -1943,7 +2839,7 @@ public sealed class MainWindow
             arrowCenter + new Vector2(-5f, -2f),
             arrowCenter + new Vector2(5f, -2f),
             arrowCenter + new Vector2(0f, 4f),
-            ImGui.GetColorU32(AemeathCyan));
+            ImGui.GetColorU32(SitePixelBorder));
 
         if (!treasureMapSelectorOpen || plugin.TreasureMapOptionCount == 0)
             return;
@@ -1953,10 +2849,10 @@ public sealed class MainWindow
         var popupHeight = Math.Min(optionCount, 6) * optionHeight;
         var popupTopLeft = topLeft + new Vector2(0f, height + 4f);
         drawList.AddRectFilled(popupTopLeft, popupTopLeft + new Vector2(width, popupHeight),
-            ImGui.GetColorU32(new Vector4(0.035f, 0.07f, 0.18f, 0.98f)), 8f);
+            ImGui.GetColorU32(new Vector4(0.29f, 0.21f, 0.46f, 0.98f)), 3f);
         drawList.AddRect(popupTopLeft, popupTopLeft + new Vector2(width, popupHeight),
-            ImGui.GetColorU32(new Vector4(0.07f, 0.57f, 0.68f, 0.54f)), 8f,
-            ImDrawFlags.RoundCornersAll, 1f);
+            ImGui.GetColorU32(new Vector4(1.00f, 0.78f, 0.91f, 0.72f)), 3f,
+            ImDrawFlags.RoundCornersAll, 1.5f);
 
         for (var index = 0; index < Math.Min(optionCount, 6); index++)
         {
@@ -1967,11 +2863,11 @@ public sealed class MainWindow
             var selected = index == plugin.SelectedTreasureMapIndex;
             var rowHovered = ImGui.IsItemHovered();
             var rowFill = selected
-                ? new Vector4(0.76f, 0.25f, 0.53f, 0.72f)
+                ? new Vector4(0.79f, 0.29f, 0.58f, 0.88f)
                 : rowHovered
-                    ? new Vector4(0.10f, 0.35f, 0.43f, 0.78f)
-                    : new Vector4(0.08f, 0.14f, 0.28f, 0.52f);
-            drawList.AddRectFilled(rowTopLeft, rowTopLeft + rowSize, ImGui.GetColorU32(rowFill), 5f);
+                    ? new Vector4(0.56f, 0.38f, 0.68f, 0.90f)
+                    : new Vector4(0.43f, 0.33f, 0.62f, 0.66f);
+            drawList.AddRectFilled(rowTopLeft, rowTopLeft + rowSize, ImGui.GetColorU32(rowFill), 2f);
             DrawItemIconAt(drawList, plugin.GetTreasureMapOptionItemId(index), rowTopLeft + new Vector2(8f, 3f), 30f);
             drawList.AddText(rowTopLeft + new Vector2(46f, 9f), ImGui.GetColorU32(AemeathInk),
                 plugin.GetTreasureMapOptionName(index));
