@@ -3113,6 +3113,16 @@ public sealed class MainWindow
         }
         ImGui.TextDisabled("仅对本地角色动作生效；输入 0 会将动画锁设为 0。启用后需重新执行动作验证。" );
 
+        ImGui.Separator();
+        ImGui.TextColored(AemeathTextPink, "宝物库选门动画");
+        var skipDoorAnimation = plugin.DoorSelectionSkipAnimationEnabled;
+        if (DrawAemeathToggle("DoorSelectionSkipAnimation", "Hook 跳过开门动画", ref skipDoorAnimation))
+        {
+            plugin.SetDoorSelectionSkipAnimationEnabled(skipDoorAnimation);
+        }
+        ImGui.TextWrapped(plugin.DoorSelectionSkipAnimationStatus);
+        ImGui.TextDisabled("仅在选门地图确认门后短时间生效；默认关闭，Hook 不可用时自动保留原动画。" );
+
         var testButtonsInRow = 0;
         void ContinueTestButtonRow()
         {
@@ -3179,10 +3189,31 @@ public sealed class MainWindow
         {
             plugin.TestDetectDoorSelectionGlowingDoor();
         }
-        ContinueTestButtonRow();
+        ImGui.NewLine();
+        ImGui.Separator();
+        ImGui.TextColored(AemeathTextPink, "强欲卡牌监听测试");
+        var greedLifecycleMonitoring = plugin.DoorSelectionGreedTrapLifecycleMonitoring;
+        if (DrawAemeathToggle("TestGreedTrapLifecycle", "监听强欲卡牌数据", ref greedLifecycleMonitoring))
+        {
+            plugin.SetDoorSelectionGreedTrapLifecycleMonitoring(greedLifecycleMonitoring);
+        }
+        ImGui.TextWrapped(plugin.DoorSelectionGreedTrapLifecycleTestStatus);
+        ImGui.TextDisabled("仅监听强欲页面与 TreasureHighLow 的 PostRefresh，最多保留 10 条参数和图片节点；不触发交互。");
+        ImGui.NewLine();
+        testButtonsInRow = 0;
         if (DrawAemeathButton("TestGreedTrapPage", "检测强欲页面", new Vector2(158f, 30f)))
         {
             plugin.TestDetectDoorSelectionGreedTrapPage();
+        }
+        ContinueTestButtonRow();
+        if (DrawAemeathButton("TestGreedTrapChallengeClick", "测试点击解除陷阱", new Vector2(178f, 30f)))
+        {
+            plugin.TestClickDoorSelectionGreedTrapChallenge();
+        }
+        ContinueTestButtonRow();
+        if (DrawAemeathButton("TestGreedTrapCardValue", "读取强欲卡牌点数", new Vector2(178f, 30f)))
+        {
+            plugin.TestReadDoorSelectionGreedTrapCardValue();
         }
         ImGui.TextWrapped(plugin.InteractableObjectScanStatus);
         ImGui.TextWrapped(plugin.EffectCenterTestStatus);
@@ -3190,6 +3221,8 @@ public sealed class MainWindow
         ImGui.TextWrapped(plugin.DoorSelectionFloorDetectionTestStatus);
         ImGui.TextWrapped(plugin.DoorSelectionGlowingDoorTestStatus);
         ImGui.TextWrapped(plugin.DoorSelectionGreedTrapPageDetectionTestStatus);
+        ImGui.TextWrapped(plugin.DoorSelectionGreedTrapChallengeClickTestStatus);
+        ImGui.TextWrapped(plugin.DoorSelectionGreedTrapCardValueTestStatus);
 
         ImGui.SetNextItemWidth(180);
         ImGui.InputText("目标 BaseID###NavigationBaseId", ref navigationBaseIdInput, 16);

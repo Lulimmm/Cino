@@ -35,6 +35,8 @@ public sealed class PluginConfiguration : IPluginConfiguration
 
     public int AnimationLockOverrideMilliseconds { get; set; } = 550;
 
+    public bool DoorSelectionSkipAnimationEnabled { get; set; }
+
     public bool DeepDungeonMovementEnabled { get; set; }
 
     public float DeepDungeonMovementAdjustment { get; set; }

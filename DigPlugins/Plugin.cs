@@ -8,6 +8,7 @@ using Dalamud.Game.ClientState.Aetherytes;
 using Dalamud.Game.ClientState;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Enums;
+using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Game.Text;
 using Dalamud.Plugin.Services;
 using Dalamud.Interface.Textures;
@@ -77,23 +78,35 @@ public sealed class Plugin : IDalamudPlugin
     private const uint DigGeneralActionId = 20;
     private const uint OptimizedInteractionMapId = 12;
     private const uint RouletteExitBaseId = 2000139;
+    private const uint DoorSelectionGreedTrapLargeBaseId = 2013872;
+    private const uint DoorSelectionGreedTrapSmallBaseId = 2013873;
     private const float RouletteInteractionDistance = 2f;
     // Door collision geometry can prevent vnavmesh from reaching the object
     // center. 3.5 yalms is close enough for the game interaction range while
     // allowing the interaction to fire before movement stalls at the hitbox.
     private const float DoorSelectionInteractionDistance = 3.5f;
-    private static readonly TimeSpan DoorSelectionVfxTravelDelay = TimeSpan.FromSeconds(5);
+    private const float DoorSelectionVfxRapidMovementDistance = 0.5f;
+    private const float DoorSelectionVfxStableMovementDistance = 0.35f;
+    private static readonly TimeSpan DoorSelectionVfxStableDuration = TimeSpan.FromMilliseconds(800);
     private static readonly string[] DoorSelectionGreedTrapAddonNames =
     [
         "SelectString",
         "SelectStringDialog",
+        "SelectList",
+        "SelectOk",
+        "Talk",
+        "TreasureMap",
         "TreasureHunt",
         "TreasureDungeon",
         "TreasureDungeonTrap",
         "TreasureHuntTrap",
         "TreasureHuntGreed",
         "GreedTrap",
+        "NeedGreed",
+        "NeedGreedTargeting",
         "DeepDungeonTrap",
+        "TreasureHighLow",
+        "_ScreenInfoBack",
     ];
     private const float FlagNavigationMeaningfulProgressDistance = 1.5f;
     private static readonly TimeSpan FlagNavigationJitterTimeout = TimeSpan.FromSeconds(5);
@@ -161,6 +174,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly IDalamudPluginInterface pluginInterface;
     private readonly IGameInventory gameInventory;
     private readonly IGameGui gameGui;
+    private readonly IAddonLifecycle addonLifecycle;
     private readonly IChatGui chatGui;
     private readonly IFramework framework;
     private readonly IAetheryteList aetheryteList;
@@ -180,6 +194,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly GlobetrotterTreasureMapCore globetrotterTreasureMapCore;
     private readonly VfxEffectCenterProbe vfxEffectCenterProbe;
     private readonly AnimationLockController animationLockController;
+    private readonly DoorSelectionAnimationSkipController doorSelectionAnimationSkipController;
     private readonly DeepDungeonMovementController deepDungeonMovementController;
     private readonly DeepDungeonSpeedController deepDungeonSpeedController;
     private CredentialRole sessionCredentialRole;
@@ -301,6 +316,9 @@ public sealed class Plugin : IDalamudPlugin
     private bool doorSelectionInitialChestYesConfirmed;
     private bool doorSelectionPostCombatChestHandled;
     private int doorSelectionFloor;
+    private bool doorSelectionFifthFloorConfirmedByLockedExit;
+    private uint doorSelectionFloorFiveEnemyEntityId;
+    private bool doorSelectionFloorFiveEnemyMoveIssued;
     private int doorSelectionRuntimeChoiceFloor;
     private DoorSelectionChoice? doorSelectionRuntimeChoice;
     private DoorSelectionChoice? doorSelectionLastGlowingDoorChoice;
@@ -311,7 +329,15 @@ public sealed class Plugin : IDalamudPlugin
     private bool doorSelectionDoorMoveIssued;
     private DateTime doorSelectionGreedTrapNextActionAt;
     private bool doorSelectionGreedTrapChallengeAccepted;
+    private DateTime doorSelectionGreedTrapChallengeAcceptedAt;
+    private int[]? doorSelectionGreedTrapPreChallengeNumbers;
+    private int doorSelectionGreedTrapRoundsCompleted;
+    private bool doorSelectionGreedTrapConfirmationPending;
+    private bool doorSelectionGreedTrapFinished;
     private int doorSelectionGreedTrapLeftCardValue;
+    private int doorSelectionGreedTrapRefreshedCardValue;
+    private DateTime doorSelectionGreedTrapCardValueRefreshedAt;
+    private readonly Dictionary<string, int[]> doorSelectionGreedTrapPreviousRefreshIntegers = new(StringComparer.Ordinal);
     private DoorSelectionGreedTrapChoice? doorSelectionGreedTrapChoice;
     private ulong doorSelectionGreedTrapTargetEntityId;
     private bool doorSelectionGreedTrapMoveIssued;
@@ -323,14 +349,26 @@ public sealed class Plugin : IDalamudPlugin
     private bool doorSelectionGreedTrapPageDetected;
     private string doorSelectionGreedTrapAddonName = string.Empty;
     private DateTime doorSelectionGreedTrapLastSeenAt;
+    private DateTime doorSelectionGreedTrapNoticeSeenAt;
     private DateTime doorSelectionGreedTrapNextFullScanAt;
+    private bool greedCardLifecycleMonitoring;
+    private uint greedCardRefreshEventCount;
+    private readonly List<string> greedCardRefreshHistory = [];
+    private string greedCardImageSignatureBeforeChallenge = string.Empty;
     private DateTime doorSelectionDoorAnimationUntil;
     private bool confirmDoorSelectionDoorPending;
     private DateTime doorSelectionDoorConfirmDeadline;
     private bool doorSelectionDoorYesConfirmed;
+    private bool doorSelectionDoorAnimationSkipArmed;
     private bool doorSelectionVfxMoveIssued;
     private System.Numerics.Vector3 doorSelectionVfxPosition;
-    private DateTime doorSelectionVfxTravelUntil;
+    private bool doorSelectionVfxTravelPending;
+    private bool doorSelectionVfxRapidMovementObserved;
+    private bool doorSelectionVfxPositionSampleValid;
+    private System.Numerics.Vector3 doorSelectionVfxLastPlayerPosition;
+    private System.Numerics.Vector3 doorSelectionVfxStableAnchor;
+    private float doorSelectionVfxAccumulatedMovement;
+    private DateTime doorSelectionVfxStableSince;
     private ulong doorSelectionExitEntityId;
     private bool doorSelectionExitMoveIssued;
     private bool doorSelectionExitPositionSampleValid;
@@ -480,6 +518,7 @@ public sealed class Plugin : IDalamudPlugin
         IGameConfig gameConfig,
         IGameInventory gameInventory,
         IGameGui gameGui,
+        IAddonLifecycle addonLifecycle,
         IChatGui chatGui,
         IFramework framework,
         IAetheryteList aetheryteList,
@@ -500,6 +539,7 @@ public sealed class Plugin : IDalamudPlugin
         this.pluginInterface = pluginInterface;
         this.gameInventory = gameInventory;
         this.gameGui = gameGui;
+        this.addonLifecycle = addonLifecycle;
         this.chatGui = chatGui;
         this.framework = framework;
         this.aetheryteList = aetheryteList;
@@ -526,6 +566,12 @@ public sealed class Plugin : IDalamudPlugin
             log,
             () => configuration.AnimationLockOverrideEnabled && HasDeveloperCredential,
             () => configuration.AnimationLockOverrideMilliseconds);
+
+        doorSelectionAnimationSkipController = new DoorSelectionAnimationSkipController(
+            interop,
+            sigScanner,
+            log,
+            ShouldSkipDoorSelectionAnimation);
 
         deepDungeonMovementController = new DeepDungeonMovementController(
             framework,
@@ -791,8 +837,14 @@ public sealed class Plugin : IDalamudPlugin
     public string DoorSelectionGlowingDoorTestStatus { get; private set; } = "尚未测试门发光消息。";
 
     public string DoorSelectionGreedTrapPageDetectionTestStatus { get; private set; } = "尚未检测强欲页面。";
+    public string DoorSelectionGreedTrapCardValueTestStatus { get; private set; } = "尚未读取强欲卡牌点数。";
+    public string DoorSelectionGreedTrapChallengeClickTestStatus { get; private set; } = "尚未测试挑战按钮。";
 
     public string OtherPluginTestStatus { get; private set; } = "OtherPlugin feature not tested yet.";
+
+    public string DoorSelectionGreedTrapLifecycleTestStatus { get; private set; } = "尚未启动卡牌 UI 监听。";
+
+    public bool DoorSelectionGreedTrapLifecycleMonitoring => greedCardLifecycleMonitoring;
 
     public string OtherPluginMarketStatus => openMarketAnywhere.Status;
 
@@ -805,6 +857,34 @@ public sealed class Plugin : IDalamudPlugin
     public bool AnimationLockOverrideEnabled => configuration.AnimationLockOverrideEnabled;
 
     public int AnimationLockOverrideMilliseconds => configuration.AnimationLockOverrideMilliseconds;
+
+    public bool DoorSelectionSkipAnimationEnabled => configuration.DoorSelectionSkipAnimationEnabled;
+
+    public string DoorSelectionSkipAnimationStatus => doorSelectionAnimationSkipController.Status;
+
+    public void SetDoorSelectionSkipAnimationEnabled(bool enabled)
+    {
+        configuration.DoorSelectionSkipAnimationEnabled = enabled;
+        SaveConfiguration();
+    }
+
+    private bool ShouldSkipDoorSelectionAnimation()
+    {
+        if (!configuration.DoorSelectionSkipAnimationEnabled ||
+            !doorSelectionModeActive ||
+            !IsSelectedDoorSelectionRoute ||
+            !TreasureMapDefinitions.DoorSelectionInstanceMapIds.Contains(clientState.MapId) ||
+            !(doorSelectionDoorYesConfirmed || doorSelectionDoorAnimationSkipArmed) ||
+            doorSelectionInteractedDoorBaseId == 0 ||
+            doorSelectionDoorAnimationUntil == default)
+        {
+            return false;
+        }
+
+        // Keep the arm window short. The door confirmation has already been
+        // accepted, while later portal/floor events must continue normally.
+        return DateTime.UtcNow <= doorSelectionDoorAnimationUntil.AddSeconds(8);
+    }
 
     public bool DeepDungeonMovementEnabled => configuration.DeepDungeonMovementEnabled;
 
@@ -1002,6 +1082,7 @@ public sealed class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
+        StopDoorSelectionGreedTrapLifecycleMonitor();
         UnloadOptimizedInteraction();
         pluginInterface.UiBuilder.OpenMainUi -= mainWindow.Open;
         pluginInterface.UiBuilder.Draw -= mainWindow.Draw;
@@ -1014,6 +1095,7 @@ public sealed class Plugin : IDalamudPlugin
         chatGui.ChatMessage -= OnChatMessage;
         openMarketAnywhere.Dispose();
         animationLockController.Dispose();
+        doorSelectionAnimationSkipController.Dispose();
         deepDungeonMovementController.Dispose();
         deepDungeonSpeedController.Dispose();
         gameGui.HoveredItemChanged -= globetrotterTreasureMapCore.OnHover;
@@ -1954,13 +2036,17 @@ public sealed class Plugin : IDalamudPlugin
 
         if (hasDoorFloor)
         {
+            var exitDetails = doorBaseId == RouletteExitBaseId
+                ? $"；退出点状态：{DescribeDoorSelectionExitPointCandidates()}"
+                : string.Empty;
             DoorSelectionFloorDetectionTestStatus =
-                $"当前选门层数：第 {doorFloor} 层；来源：最近门 BaseID {doorBaseId}。";
+                $"当前选门层数：第 {doorFloor} 层；来源实体 BaseID {doorBaseId}{exitDetails}。";
             PrintEcho(DoorSelectionFloorDetectionTestStatus);
             return;
         }
 
-        DoorSelectionFloorDetectionTestStatus = "当前选门层数：第 1 层（默认；未检测到可识别的最近门 BaseID）。";
+        DoorSelectionFloorDetectionTestStatus =
+            $"当前选门层数：第 1 层（默认；未找到层数证据）。退出点状态：{DescribeDoorSelectionExitPointCandidates()}";
         PrintEcho(DoorSelectionFloorDetectionTestStatus);
     }
 
@@ -1987,7 +2073,19 @@ public sealed class Plugin : IDalamudPlugin
                 out var pageHasGreedTrapSignal) ||
             !pageHasGreedTrapSignal)
         {
-            DoorSelectionGreedTrapPageDetectionTestStatus = "未检测到强欲页面。";
+            if (TryFindDoorSelectionGreedTrapNotice(out var noticeAddonName, out _))
+            {
+                DoorSelectionGreedTrapPageDetectionTestStatus =
+                    $"已检测到强欲陷阱通知条：Addon {noticeAddonName}；等待完整解除页面。";
+            }
+            else
+            {
+                var activeAddons = DescribeDoorSelectionActiveAddons();
+                DoorSelectionGreedTrapPageDetectionTestStatus =
+                    string.IsNullOrWhiteSpace(activeAddons)
+                        ? "未检测到强欲页面或强欲陷阱通知。"
+                        : $"未检测到强欲页面或通知；当前活动 UI：{activeAddons}";
+            }
             PrintEcho(DoorSelectionGreedTrapPageDetectionTestStatus);
             return;
         }
@@ -1999,6 +2097,293 @@ public sealed class Plugin : IDalamudPlugin
         DoorSelectionGreedTrapPageDetectionTestStatus =
             $"已检测到强欲页面：Addon {addonName}；文本特征：{preview}";
         PrintEcho(DoorSelectionGreedTrapPageDetectionTestStatus);
+    }
+
+    public void TestReadDoorSelectionGreedTrapCardValue()
+    {
+        DoorSelectionGreedTrapCardValueTestStatus = "正在读取强欲页面左侧卡牌点数...";
+        _ = framework.RunOnFrameworkThread(TestReadDoorSelectionGreedTrapCardValueOnFrameworkThread);
+    }
+
+    public void TestClickDoorSelectionGreedTrapChallenge()
+    {
+        DoorSelectionGreedTrapChallengeClickTestStatus = "正在查找并触发挑战解除陷阱...";
+        _ = framework.RunOnFrameworkThread(TestClickDoorSelectionGreedTrapChallengeOnFrameworkThread);
+    }
+
+    private unsafe void TestClickDoorSelectionGreedTrapChallengeOnFrameworkThread()
+    {
+        if (!TreasureMapDefinitions.DoorSelectionInstanceMapIds.Contains(clientState.MapId))
+        {
+            DoorSelectionGreedTrapChallengeClickTestStatus = $"当前地图 {clientState.MapId} 不是选门副本。";
+            PrintEcho(DoorSelectionGreedTrapChallengeClickTestStatus);
+            return;
+        }
+
+        if (!TryFindDoorSelectionGreedTrapAddon(
+                out var addon,
+                out var addonName,
+                out var addonText,
+                out var pageHasGreedTrapSignal) || !pageHasGreedTrapSignal)
+        {
+            DoorSelectionGreedTrapChallengeClickTestStatus =
+                $"未找到强欲挑战控件；活动 UI：{DescribeDoorSelectionActiveAddons()}";
+            PrintEcho(DoorSelectionGreedTrapChallengeClickTestStatus);
+            return;
+        }
+
+        var normalizedText = NormalizeDoorSelectionGreedTrapText(addonText);
+        if (!IsStrongDoorSelectionGreedTrapPrompt(addonText))
+        {
+            DoorSelectionGreedTrapChallengeClickTestStatus =
+                $"找到强欲 UI（{addonName}），但当前没有挑战解除陷阱选项；文本：{normalizedText}";
+            PrintEcho(DoorSelectionGreedTrapChallengeClickTestStatus);
+            return;
+        }
+
+        greedCardImageSignatureBeforeChallenge = DescribeDoorSelectionImageNodeDetails(addon);
+        var clicked = TryFireDoorSelectionChallengeButton(addon, out _);
+        DoorSelectionGreedTrapChallengeClickTestStatus = clicked
+            ? $"已向 {addonName} 分发挑战解除陷阱点击事件；请观察游戏是否切换到卡牌页。"
+            : $"找到 {addonName} 的挑战文案，但未找到可分发的按钮事件/SelectString 条目；文本：{normalizedText}";
+        PrintEcho(DoorSelectionGreedTrapChallengeClickTestStatus);
+    }
+
+    private unsafe void TestReadDoorSelectionGreedTrapCardValueOnFrameworkThread()
+    {
+        if (!TreasureMapDefinitions.DoorSelectionInstanceMapIds.Contains(clientState.MapId))
+        {
+            DoorSelectionGreedTrapCardValueTestStatus =
+                $"未检测：当前地图 {clientState.MapId} 不是选门副本。";
+            PrintEcho(DoorSelectionGreedTrapCardValueTestStatus);
+            return;
+        }
+
+        if (!TryFindDoorSelectionGreedTrapAddon(
+                out var addon,
+                out var addonName,
+                out var addonText,
+                out var pageHasGreedTrapSignal) ||
+            !pageHasGreedTrapSignal)
+        {
+            DoorSelectionGreedTrapCardValueTestStatus = "未检测到强欲页面，无法读取卡牌点数。";
+            PrintEcho(DoorSelectionGreedTrapCardValueTestStatus);
+            return;
+        }
+
+        var isHighLowAddon = string.Equals(addonName, "TreasureHighLow", StringComparison.OrdinalIgnoreCase);
+        var isCardPage = isHighLowAddon || IsStrongDoorSelectionCardPage(addonText) ||
+                         doorSelectionGreedTrapChallengeAccepted &&
+                         string.Equals(addonName, doorSelectionGreedTrapAddonName, StringComparison.OrdinalIgnoreCase) &&
+                         !IsStrongDoorSelectionGreedTrapPrompt(addonText);
+        if (!isCardPage)
+        {
+            DoorSelectionGreedTrapCardValueTestStatus =
+                $"已检测到强欲挑战页（Addon {addonName}，卡牌页特征未出现）；卡牌数组[{(int)NumberArrayType.TreasureHighLow}]=" +
+                DescribeDoorSelectionHighLowNumberArray() + "; " + DescribeDoorSelectionCardCandidates(addon) + "; " +
+                DescribeDoorSelectionCandidateNumberArrays() + "; " + DescribeDoorSelectionImageNodes(addon);
+            PrintEcho(DoorSelectionGreedTrapCardValueTestStatus);
+            return;
+        }
+
+        var currentImageSignature = DescribeDoorSelectionImageNodeDetails(addon);
+        if (string.IsNullOrEmpty(greedCardImageSignatureBeforeChallenge) ||
+            string.Equals(currentImageSignature, greedCardImageSignatureBeforeChallenge, StringComparison.Ordinal))
+        {
+            DoorSelectionGreedTrapCardValueTestStatus =
+                "TreasureHighLow 已出现，但图片节点仍与挑战前一致；当前视为牌背/尚未翻牌，不报告点数。" +
+                "请先触发“挑战解除陷阱”，翻牌后再读取。";
+            DoorSelectionGreedTrapCardValueTestStatus += " " + currentImageSignature;
+            PrintEcho(DoorSelectionGreedTrapCardValueTestStatus);
+            return;
+        }
+
+        var value = TryReadDoorSelectionLeftCardValue(addon);
+        if (value is < 1 or > 9 &&
+            doorSelectionGreedTrapCardValueRefreshedAt != default &&
+            DateTime.UtcNow - doorSelectionGreedTrapCardValueRefreshedAt <= TimeSpan.FromSeconds(5))
+        {
+            value = doorSelectionGreedTrapRefreshedCardValue;
+        }
+        if (value is < 1 or > 9)
+        {
+            DoorSelectionGreedTrapCardValueTestStatus =
+                $"已检测到强欲页面（Addon {addonName}），但暂未读取到左侧卡牌点数。";
+            DoorSelectionGreedTrapCardValueTestStatus += $" 专用数组[{(int)NumberArrayType.TreasureHighLow}]={DescribeDoorSelectionHighLowNumberArray()}；" +
+                                                         DescribeDoorSelectionCardCandidates(addon) + "；" +
+                                                         DescribeDoorSelectionCandidateNumberArrays() + "；" +
+                                                         DescribeDoorSelectionImageNodes(addon);
+            PrintEcho(DoorSelectionGreedTrapCardValueTestStatus);
+            return;
+        }
+
+        var choice = GetDoorSelectionGreedTrapChoice(value);
+        DoorSelectionGreedTrapCardValueTestStatus =
+            $"强欲左侧卡牌点数：{value}；自动判断：{GetDoorSelectionGreedTrapChoiceName(choice)}。";
+        DoorSelectionGreedTrapCardValueTestStatus += $" 专用数组[{(int)NumberArrayType.TreasureHighLow}]={DescribeDoorSelectionHighLowNumberArray()}；" +
+                                                     DescribeDoorSelectionCardCandidates(addon) + "；" +
+                                                     DescribeDoorSelectionImageNodes(addon);
+        PrintEcho(DoorSelectionGreedTrapCardValueTestStatus);
+    }
+
+    public void SetDoorSelectionGreedTrapLifecycleMonitoring(bool enabled)
+    {
+        if (!enabled)
+        {
+            StopDoorSelectionGreedTrapLifecycleMonitor();
+            DoorSelectionGreedTrapLifecycleTestStatus = "卡牌 UI 监听已停止。";
+            return;
+        }
+
+        greedCardRefreshEventCount = 0;
+        greedCardRefreshHistory.Clear();
+        greedCardLifecycleMonitoring = true;
+        addonLifecycle.RegisterListener(
+            Dalamud.Game.Addon.Lifecycle.AddonEvent.PostRefresh,
+            "_ScreenInfoBack",
+            OnScreenInfoBackLifecycleEvent);
+        addonLifecycle.RegisterListener(
+            Dalamud.Game.Addon.Lifecycle.AddonEvent.PostRefresh,
+            "TreasureHighLow",
+            OnTreasureHighLowLifecycleEvent);
+        DoorSelectionGreedTrapLifecycleTestStatus =
+            "正在监听强欲页面和卡牌控件的 PostRefresh；每次刷新记录参数及卡牌图片节点。";
+    }
+
+    private void StopDoorSelectionGreedTrapLifecycleMonitor()
+    {
+        if (!greedCardLifecycleMonitoring)
+            return;
+
+        greedCardLifecycleMonitoring = false;
+        addonLifecycle.UnregisterListener(OnScreenInfoBackLifecycleEvent);
+        addonLifecycle.UnregisterListener(OnTreasureHighLowLifecycleEvent);
+    }
+
+    private unsafe void OnScreenInfoBackLifecycleEvent(
+        Dalamud.Game.Addon.Lifecycle.AddonEvent eventType,
+        Dalamud.Game.Addon.Lifecycle.AddonArgTypes.AddonArgs args) =>
+        CaptureDoorSelectionGreedTrapRefresh("_ScreenInfoBack", eventType, args);
+
+    private unsafe void OnTreasureHighLowLifecycleEvent(
+        Dalamud.Game.Addon.Lifecycle.AddonEvent eventType,
+        Dalamud.Game.Addon.Lifecycle.AddonArgTypes.AddonArgs args) =>
+        CaptureDoorSelectionGreedTrapRefresh("TreasureHighLow", eventType, args);
+
+    private unsafe void CaptureDoorSelectionGreedTrapRefresh(
+        string sourceAddonName,
+        Dalamud.Game.Addon.Lifecycle.AddonEvent eventType,
+        Dalamud.Game.Addon.Lifecycle.AddonArgTypes.AddonArgs args)
+    {
+        if (!greedCardLifecycleMonitoring ||
+            eventType != Dalamud.Game.Addon.Lifecycle.AddonEvent.PostRefresh ||
+            args.Addon.IsNull ||
+            args is not Dalamud.Game.Addon.Lifecycle.AddonArgTypes.AddonRefreshArgs refresh)
+        {
+            return;
+        }
+
+        greedCardRefreshEventCount++;
+        var addon = (AtkUnitBase*)args.Addon.Address;
+        var refreshIntegers = ReadGreedTrapRefreshIntegers(refresh.AtkValueEnumerable);
+        doorSelectionGreedTrapPreviousRefreshIntegers.TryGetValue(sourceAddonName, out var previousRefreshIntegers);
+        var changedCardCandidates = GetChangedGreedTrapCardCandidates(previousRefreshIntegers, refreshIntegers);
+        doorSelectionGreedTrapPreviousRefreshIntegers[sourceAddonName] = refreshIntegers;
+        var digit = changedCardCandidates.Length == 1
+            ? changedCardCandidates[0].ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : "unconfirmed";
+        var snapshot = $"#{greedCardRefreshEventCount} {DateTime.Now:HH:mm:ss.fff} {sourceAddonName} " +
+                       $"visible={addon->IsVisible}; card={digit}; " +
+                       $"Ints=[{string.Join(",", refreshIntegers.Select((value, index) => $"{index}:{value}"))}]; " +
+                       DescribeGreedLifecycleAtkValues(refresh.AtkValueEnumerable) +
+                       $"; HighLow={DescribeDoorSelectionHighLowNumberArray()}; " +
+                       DescribeDoorSelectionImageNodeDetails(addon);
+        greedCardRefreshHistory.Add(snapshot);
+        if (greedCardRefreshHistory.Count > 10)
+        {
+            greedCardRefreshHistory.RemoveAt(0);
+        }
+
+        if (sourceAddonName == "_ScreenInfoBack" &&
+            IsSelectedDoorSelectionRoute &&
+            TreasureMapDefinitions.DoorSelectionInstanceMapIds.Contains(clientState.MapId) &&
+            doorSelectionGreedTrapPageDetected &&
+            doorSelectionGreedTrapChallengeAccepted &&
+            changedCardCandidates.Length == 1)
+        {
+            doorSelectionGreedTrapRefreshedCardValue = changedCardCandidates[0];
+            doorSelectionGreedTrapCardValueRefreshedAt = DateTime.UtcNow;
+        }
+
+        DoorSelectionGreedTrapLifecycleTestStatus =
+            $"监听中：相关 UI 刷新={greedCardRefreshEventCount}；最近={snapshot}；" +
+            $"最近 10 次刷新={string.Join(" || ", greedCardRefreshHistory)}";
+    }
+
+    private static string DescribeGreedLifecycleAtkValues(
+        IEnumerable<Dalamud.Game.NativeWrapper.AtkValuePtr> values)
+    {
+        var descriptions = new List<string>();
+        foreach (var value in values.Take(32))
+        {
+            try
+            {
+                var text = value.GetValue()?.ToString() ?? "null";
+                descriptions.Add($"{value.ValueType}:{text.Replace('\n', ' ').Replace('\r', ' ')}");
+            }
+            catch (Exception exception)
+            {
+                descriptions.Add($"{value.ValueType}:<{exception.GetType().Name}>");
+            }
+        }
+
+        return descriptions.Count == 0
+            ? "AtkValues=empty"
+            : "AtkValues=" + string.Join(" | ", descriptions);
+    }
+
+    private static int[] ReadGreedTrapRefreshIntegers(
+        IEnumerable<Dalamud.Game.NativeWrapper.AtkValuePtr> values,
+        int maxValues = 32)
+    {
+        var integers = new List<int>();
+        foreach (var value in values.Take(maxValues))
+        {
+            if (value.ValueType.ToString() is not ("Int" or "UInt"))
+            {
+                integers.Add(0);
+                continue;
+            }
+
+            try
+            {
+                var rawValue = value.GetValue()?.ToString();
+                integers.Add(int.TryParse(rawValue, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out var parsed) ? parsed : 0);
+            }
+            catch
+            {
+                integers.Add(0);
+            }
+        }
+
+        return integers.ToArray();
+    }
+
+    private static int[] GetChangedGreedTrapCardCandidates(int[]? previous, int[] current)
+    {
+        if (previous == null || previous.Length == 0 || current.Length == 0)
+            return [];
+
+        var changed = new List<int>();
+        var count = Math.Min(previous.Length, current.Length);
+        for (var index = 0; index < count; index++)
+        {
+            if (previous[index] != current[index] && current[index] is >= 1 and <= 9)
+                changed.Add(current[index]);
+        }
+
+        return changed.Distinct().ToArray();
     }
 
     public void TestNavigateToDoorSelectionPortalVfx()
@@ -2278,6 +2663,9 @@ public sealed class Plugin : IDalamudPlugin
         doorSelectionFloorEvidenceBaseId = 0;
         doorSelectionPostCombatChestHandled = false;
         doorSelectionFloor = 0;
+        doorSelectionFifthFloorConfirmedByLockedExit = false;
+        doorSelectionFloorFiveEnemyEntityId = 0;
+        doorSelectionFloorFiveEnemyMoveIssued = false;
         doorSelectionRuntimeChoiceFloor = 0;
         doorSelectionRuntimeChoice = null;
         doorSelectionLastGlowingDoorChoice = null;
@@ -2290,8 +2678,9 @@ public sealed class Plugin : IDalamudPlugin
         confirmDoorSelectionDoorPending = false;
         doorSelectionDoorConfirmDeadline = default;
         doorSelectionDoorYesConfirmed = false;
+        doorSelectionDoorAnimationSkipArmed = false;
         doorSelectionVfxMoveIssued = false;
-        doorSelectionVfxTravelUntil = default;
+        ResetDoorSelectionVfxTravelState();
         ResetDoorSelectionGreedTrapState();
         ResetDoorSelectionChestState(resetCompleted: true);
 
@@ -5680,6 +6069,13 @@ public sealed class Plugin : IDalamudPlugin
         doorSelectionFloorDetectionPending = true;
         doorSelectionFloorEvidenceBaseId = 0;
         doorSelectionFloor = 1;
+        doorSelectionFifthFloorConfirmedByLockedExit = false;
+        doorSelectionFloorFiveEnemyEntityId = 0;
+        doorSelectionFloorFiveEnemyMoveIssued = false;
+        doorSelectionGreedTrapRoundsCompleted = 0;
+        doorSelectionGreedTrapConfirmationPending = false;
+        doorSelectionGreedTrapFinished = false;
+        ResetDoorSelectionGreedTrapState();
         doorSelectionRuntimeChoiceFloor = 0;
         doorSelectionRuntimeChoice = null;
         doorSelectionLastGlowingDoorChoice = null;
@@ -5692,8 +6088,9 @@ public sealed class Plugin : IDalamudPlugin
         confirmDoorSelectionDoorPending = false;
         doorSelectionDoorConfirmDeadline = default;
         doorSelectionDoorYesConfirmed = false;
+        doorSelectionDoorAnimationSkipArmed = false;
         doorSelectionVfxMoveIssued = false;
-        doorSelectionVfxTravelUntil = default;
+        ResetDoorSelectionVfxTravelState();
         ResetDoorSelectionChestState(resetCompleted: true);
         commandManager.ProcessCommand("/vnav stop");
         EnableAeAssistForTreasureInstance();
@@ -5876,6 +6273,13 @@ public sealed class Plugin : IDalamudPlugin
 
     private bool TryDetectDoorSelectionFloorFromNearestDoor(out int floor, out uint baseId)
     {
+        if (TryFindNearbyUntargetableDoorSelectionExitPoint(out _, out _))
+        {
+            floor = 5;
+            baseId = RouletteExitBaseId;
+            return true;
+        }
+
         var doors = objectTable
             .Where(gameObject =>
                 gameObject.IsTargetable &&
@@ -5898,6 +6302,111 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         baseId = nearestDoor.BaseId;
+        return true;
+    }
+
+    private bool TryFindNearbyUntargetableDoorSelectionExitPoint(
+        out Dalamud.Game.ClientState.Objects.Types.IGameObject? exitPoint,
+        out float distance)
+    {
+        exitPoint = null;
+        distance = float.PositiveInfinity;
+        var localPlayer = objectTable.LocalPlayer;
+        if (localPlayer == null)
+            return false;
+
+        exitPoint = objectTable
+            .Where(gameObject => gameObject.BaseId == RouletteExitBaseId && !gameObject.IsTargetable)
+            .OrderBy(gameObject => System.Numerics.Vector3.DistanceSquared(
+                localPlayer.Position,
+                gameObject.Position))
+            .FirstOrDefault();
+        if (exitPoint == null)
+            return false;
+
+        distance = System.Numerics.Vector3.Distance(localPlayer.Position, exitPoint.Position);
+        return true;
+    }
+
+    private string DescribeDoorSelectionExitPointCandidates()
+    {
+        var localPlayer = objectTable.LocalPlayer;
+        var candidates = objectTable
+            .Where(gameObject => gameObject.BaseId == RouletteExitBaseId)
+            .Select(gameObject =>
+            {
+                var distance = localPlayer == null
+                    ? float.PositiveInfinity
+                    : System.Numerics.Vector3.Distance(localPlayer.Position, gameObject.Position);
+                return $"BaseID {gameObject.BaseId}, targetable={gameObject.IsTargetable}, distance={distance:F1}";
+            })
+            .ToArray();
+
+        return candidates.Length == 0 ? "not present in object table" : string.Join("; ", candidates);
+    }
+
+    private bool TryNavigateToDoorSelectionFloorFiveEnemy()
+    {
+        if (condition[ConditionFlag.InCombat])
+            return false;
+
+        var localPlayer = objectTable.LocalPlayer;
+        if (localPlayer == null)
+        {
+            commandManager.ProcessCommand("/vnav stop");
+            AutoTreasureHuntStatus = "选门：第五层等待角色对象，以寻找敌方单位。";
+            return true;
+        }
+
+        var enemy = objectTable
+            .OfType<IBattleNpc>()
+            .Where(gameObject =>
+                gameObject.EntityId != localPlayer.EntityId &&
+                gameObject.BattleNpcKind == Dalamud.Game.ClientState.Objects.Enums.BattleNpcSubKind.Combatant &&
+                gameObject.IsTargetable &&
+                !gameObject.IsDead)
+            .OrderBy(gameObject => System.Numerics.Vector3.DistanceSquared(
+                localPlayer.Position,
+                gameObject.Position))
+            .FirstOrDefault();
+        if (enemy == null)
+        {
+            commandManager.ProcessCommand("/vnav stop");
+            doorSelectionFloorFiveEnemyEntityId = 0;
+            doorSelectionFloorFiveEnemyMoveIssued = false;
+            AutoTreasureHuntStatus = "选门：已确认第五层，等待场上出现可交战的敌方单位。";
+            return true;
+        }
+
+        if (doorSelectionFloorFiveEnemyEntityId != enemy.EntityId)
+        {
+            commandManager.ProcessCommand("/vnav stop");
+            doorSelectionFloorFiveEnemyEntityId = enemy.EntityId;
+            doorSelectionFloorFiveEnemyMoveIssued = false;
+        }
+
+        targetManager.Target = enemy;
+        commandManager.ProcessCommand("/bmrai on");
+
+        var distance = System.Numerics.Vector3.Distance(localPlayer.Position, enemy.Position);
+        if (distance <= 3.5f)
+        {
+            commandManager.ProcessCommand("/vnav stop");
+            doorSelectionFloorFiveEnemyMoveIssued = false;
+            AutoTreasureHuntStatus = $"选门：已接近第五层敌方单位（距离 {distance:F1} yalms），等待进入战斗。";
+            return true;
+        }
+
+        if (!doorSelectionFloorFiveEnemyMoveIssued)
+        {
+            var position = enemy.Position;
+            var command = FormattableString.Invariant(
+                $"/vnav moveto {position.X:F3} {position.Y:F3} {position.Z:F3}");
+            doorSelectionFloorFiveEnemyMoveIssued = commandManager.ProcessCommand(command);
+        }
+
+        AutoTreasureHuntStatus =
+            $"选门：第五层前往最近敌方单位（Entity ID {enemy.EntityId}，距离 {distance:F1} yalms）以发起战斗。";
         return true;
     }
 
@@ -5930,8 +6439,38 @@ public sealed class Plugin : IDalamudPlugin
             doorSelectionFloorDetectionPending = false;
             ResetDoorSelectionChestTarget();
             AutoTreasureHuntStatus =
-                $"选门：根据最近门 BaseID {doorBaseId} 确认当前为第 {doorSelectionFloor} 层。";
+                $"选门：根据附近实体 BaseID {doorBaseId} 确认当前为第 {doorSelectionFloor} 层。";
         }
+    }
+
+    private void BeginDoorSelectionVfxTravelTracking()
+    {
+        doorSelectionVfxTravelPending = true;
+        doorSelectionVfxRapidMovementObserved = false;
+        doorSelectionVfxPositionSampleValid = false;
+        doorSelectionVfxLastPlayerPosition = default;
+        doorSelectionVfxStableAnchor = default;
+        doorSelectionVfxAccumulatedMovement = 0f;
+        doorSelectionVfxStableSince = default;
+
+        var player = objectTable.LocalPlayer;
+        if (player != null)
+        {
+            doorSelectionVfxPositionSampleValid = true;
+            doorSelectionVfxLastPlayerPosition = player.Position;
+            doorSelectionVfxStableAnchor = player.Position;
+        }
+    }
+
+    private void ResetDoorSelectionVfxTravelState()
+    {
+        doorSelectionVfxTravelPending = false;
+        doorSelectionVfxRapidMovementObserved = false;
+        doorSelectionVfxPositionSampleValid = false;
+        doorSelectionVfxLastPlayerPosition = default;
+        doorSelectionVfxStableAnchor = default;
+        doorSelectionVfxAccumulatedMovement = 0f;
+        doorSelectionVfxStableSince = default;
     }
 
     private void TryHandleDoorSelectionMode()
@@ -5949,28 +6488,103 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (doorSelectionVfxTravelUntil != default)
+        if (doorSelectionVfxTravelPending)
         {
-            var vfxTravelStillBlocking =
-                DateTime.UtcNow < doorSelectionVfxTravelUntil ||
-                condition[ConditionFlag.BetweenAreas] ||
-                condition[ConditionFlag.BetweenAreas51] ||
-                condition[ConditionFlag.OccupiedInQuestEvent] ||
-                condition[ConditionFlag.Casting] ||
-                condition[ConditionFlag.BeingMoved];
-            if (vfxTravelStillBlocking)
+            var player = objectTable.LocalPlayer;
+            if (player == null)
             {
                 commandManager.ProcessCommand("/vnav stop");
-                AutoTreasureHuntStatus =
-                    $"选门：正在等待 VFX 光球传送至第 {doorSelectionFloor} 层完成，暂不前往宝箱。";
+                AutoTreasureHuntStatus = "选门：正在等待取得角色坐标，暂不前往下一层宝箱。";
                 return;
             }
 
-            doorSelectionVfxTravelUntil = default;
-            AutoTreasureHuntStatus = $"选门：VFX 光球传送已结束，开始寻找第 {doorSelectionFloor} 层宝箱。";
+            var currentPosition = player.Position;
+            if (!doorSelectionVfxPositionSampleValid)
+            {
+                doorSelectionVfxPositionSampleValid = true;
+                doorSelectionVfxLastPlayerPosition = currentPosition;
+                doorSelectionVfxStableAnchor = currentPosition;
+                doorSelectionVfxStableSince = default;
+                commandManager.ProcessCommand("/vnav stop");
+                AutoTreasureHuntStatus = "选门：正在等待 VFX 光球的 XYZ 位移。";
+                return;
+            }
+
+            var movementDistance = System.Numerics.Vector3.Distance(
+                currentPosition, doorSelectionVfxLastPlayerPosition);
+            doorSelectionVfxLastPlayerPosition = currentPosition;
+
+            if (!doorSelectionVfxRapidMovementObserved &&
+                movementDistance > DoorSelectionVfxStableMovementDistance)
+            {
+                doorSelectionVfxAccumulatedMovement += movementDistance;
+            }
+
+            if (!doorSelectionVfxRapidMovementObserved &&
+                (movementDistance >= DoorSelectionVfxRapidMovementDistance ||
+                 doorSelectionVfxAccumulatedMovement >= 1.5f))
+            {
+                doorSelectionVfxRapidMovementObserved = true;
+                doorSelectionVfxStableAnchor = currentPosition;
+                doorSelectionVfxStableSince = default;
+                AutoTreasureHuntStatus =
+                    $"选门：检测到 VFX 光球 XYZ 快速位移 ({movementDistance:F2})，等待落点坐标稳定。";
+            }
+
+            var stableDisplacement = doorSelectionVfxRapidMovementObserved
+                ? System.Numerics.Vector3.Distance(currentPosition, doorSelectionVfxStableAnchor)
+                : float.MaxValue;
+            if (doorSelectionVfxRapidMovementObserved &&
+                stableDisplacement > DoorSelectionVfxStableMovementDistance)
+            {
+                doorSelectionVfxStableAnchor = currentPosition;
+                doorSelectionVfxStableSince = default;
+            }
+            else if (doorSelectionVfxRapidMovementObserved && doorSelectionVfxStableSince == default)
+            {
+                doorSelectionVfxStableSince = DateTime.UtcNow;
+            }
+
+            var stableDuration = doorSelectionVfxStableSince == default
+                ? TimeSpan.Zero
+                : DateTime.UtcNow - doorSelectionVfxStableSince;
+            if (!doorSelectionVfxRapidMovementObserved ||
+                stableDuration < DoorSelectionVfxStableDuration)
+            {
+                commandManager.ProcessCommand("/vnav stop");
+                if (doorSelectionVfxRapidMovementObserved)
+                {
+                    AutoTreasureHuntStatus =
+                        $"选门：VFX 光球已发生 XYZ 位移，等待落点稳定 " +
+                        $"({stableDuration.TotalMilliseconds:0}/{DoorSelectionVfxStableDuration.TotalMilliseconds:0}ms" +
+                        $"，偏移 {stableDisplacement:F2})。";
+                }
+
+                return;
+            }
+
+            ResetDoorSelectionVfxTravelState();
+            AutoTreasureHuntStatus = $"选门：检测到 VFX 光球位移结束且 XYZ 已稳定，开始寻找第 {doorSelectionFloor} 层宝箱。";
         }
 
         TryResolveDoorSelectionFloorWithDefault();
+
+        if (doorSelectionFloor == 5 && !doorSelectionFifthFloorConfirmedByLockedExit)
+        {
+            if (!TryFindNearbyUntargetableDoorSelectionExitPoint(out _, out var exitDistance))
+            {
+                commandManager.ProcessCommand("/vnav stop");
+                ResetDoorSelectionChestTarget();
+                AutoTreasureHuntStatus =
+                    $"选门：等待附近出现不可选中的退出点 BaseID {RouletteExitBaseId}，以确认进入第五层。";
+                return;
+            }
+
+            doorSelectionFifthFloorConfirmedByLockedExit = true;
+            doorSelectionFloorEvidenceBaseId = RouletteExitBaseId;
+            AutoTreasureHuntStatus =
+                $"选门：检测到附近不可选中的退出点 BaseID {RouletteExitBaseId}（距离 {exitDistance:F1} yalms），确认进入第五层。";
+        }
 
         if (doorSelectionFloor is < 1 or > 5)
         {
@@ -5982,6 +6596,12 @@ public sealed class Plugin : IDalamudPlugin
 
         if (TryHandleDoorSelectionCombatState())
         {
+            return;
+        }
+
+        if (doorSelectionCombatStartedThisFloor && condition[ConditionFlag.InCombat])
+        {
+            AutoTreasureHuntStatus = $"选门：第 {doorSelectionFloor} 层战斗进行中，等待战斗结束后处理宝箱。";
             return;
         }
 
@@ -6023,6 +6643,15 @@ public sealed class Plugin : IDalamudPlugin
 
         if (DateTime.UtcNow < doorSelectionDutyReadyAt)
         {
+            return;
+        }
+
+        if (doorSelectionFloor == 5 &&
+            !doorSelectionCombatStartedThisFloor &&
+            !doorSelectionPostCombatChestPending &&
+            !doorSelectionInitialChestCompleted)
+        {
+            TryNavigateToDoorSelectionFloorFiveEnemy();
             return;
         }
 
@@ -6337,6 +6966,8 @@ public sealed class Plugin : IDalamudPlugin
                 return;
 
             doorSelectionFloor++;
+            doorSelectionFloorDetectionPending = doorSelectionFloor == 5;
+            doorSelectionFloorEvidenceBaseId = 0;
             doorSelectionRuntimeChoiceFloor = 0;
             doorSelectionRuntimeChoice = null;
             doorSelectionDoorEntityId = 0;
@@ -6346,7 +6977,10 @@ public sealed class Plugin : IDalamudPlugin
             confirmDoorSelectionDoorPending = false;
             doorSelectionDoorConfirmDeadline = default;
             doorSelectionDoorYesConfirmed = false;
+            doorSelectionDoorAnimationSkipArmed = false;
             doorSelectionVfxMoveIssued = false;
+            doorSelectionFloorFiveEnemyEntityId = 0;
+            doorSelectionFloorFiveEnemyMoveIssued = false;
             doorSelectionInitialChestCompleted = false;
             doorSelectionPostCombatChestPending = false;
             doorSelectionPostCombatChestHandled = false;
@@ -6356,7 +6990,7 @@ public sealed class Plugin : IDalamudPlugin
             doorSelectionInitialChestYesConfirmed = false;
             doorSelectionInitialChestEntityId = 0;
             doorSelectionDutyReadyAt = DateTime.UtcNow.AddSeconds(1);
-            doorSelectionVfxTravelUntil = DateTime.UtcNow + DoorSelectionVfxTravelDelay;
+            BeginDoorSelectionVfxTravelTracking();
             ResetDoorSelectionChestTarget();
             ResetDoorSelectionExitState();
             AutoTreasureHuntStatus = $"选门：已到达 VFX 中心，等待光球传送至第 {doorSelectionFloor} 层完成。";
@@ -6420,6 +7054,7 @@ public sealed class Plugin : IDalamudPlugin
         confirmDoorSelectionDoorPending = true;
         doorSelectionDoorConfirmDeadline = DateTime.UtcNow.AddSeconds(10);
         doorSelectionDoorYesConfirmed = false;
+        doorSelectionDoorAnimationSkipArmed = false;
         doorSelectionVfxMoveIssued = false;
         AutoTreasureHuntStatus = $"选门：已交互第 {doorSelectionFloor} 层门，等待确认窗口并自动点击“是”。";
     }
@@ -6436,6 +7071,7 @@ public sealed class Plugin : IDalamudPlugin
             confirmDoorSelectionDoorPending = false;
             doorSelectionDoorConfirmDeadline = default;
             doorSelectionDoorYesConfirmed = false;
+            doorSelectionDoorAnimationSkipArmed = false;
             doorSelectionDoorAnimationUntil = default;
             doorSelectionInteractedDoorBaseId = 0;
             doorSelectionDoorMoveIssued = false;
@@ -6450,6 +7086,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        doorSelectionDoorAnimationSkipArmed = true;
         if (addon->FireCallbackInt(0))
         {
             confirmDoorSelectionDoorPending = false;
@@ -6459,6 +7096,7 @@ public sealed class Plugin : IDalamudPlugin
         }
         else
         {
+            doorSelectionDoorAnimationSkipArmed = false;
             AutoTreasureHuntStatus = "选门：门确认“是”回调未被接受，继续重试。";
         }
     }
@@ -6666,6 +7304,43 @@ public sealed class Plugin : IDalamudPlugin
     private unsafe bool TryHandleDoorSelectionGreedTrap()
     {
         var now = DateTime.UtcNow;
+
+        if (doorSelectionGreedTrapFinished)
+            return false;
+
+        if (doorSelectionGreedTrapConfirmationPending)
+        {
+            var confirmation = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
+            if (confirmation == null || !confirmation->IsReady || !confirmation->IsVisible)
+            {
+                AutoTreasureHuntStatus =
+                    $"选门：第 {doorSelectionGreedTrapRoundsCompleted + 1}/5 次大/小交互已完成，等待确认窗口。";
+                return true;
+            }
+
+            if (!confirmation->FireCallbackInt(0))
+            {
+                AutoTreasureHuntStatus =
+                    $"选门：第 {doorSelectionGreedTrapRoundsCompleted + 1}/5 次确认尚未接受，正在重试。";
+                return true;
+            }
+
+            doorSelectionGreedTrapConfirmationPending = false;
+            doorSelectionGreedTrapRoundsCompleted++;
+            ResetDoorSelectionGreedTrapState();
+            if (doorSelectionGreedTrapRoundsCompleted >= 5)
+            {
+                doorSelectionGreedTrapFinished = true;
+                AutoTreasureHuntStatus = "选门：强欲五次挑战均已确认完成，恢复副本流程。";
+                return false;
+            }
+
+            doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(500);
+            AutoTreasureHuntStatus =
+                $"选门：第 {doorSelectionGreedTrapRoundsCompleted}/5 次挑战已确认，等待下一次强欲页面。";
+            return true;
+        }
+
         if (!TryFindDoorSelectionGreedTrapAddon(
                 out var addon,
                 out var addonName,
@@ -6679,6 +7354,23 @@ public sealed class Plugin : IDalamudPlugin
                 now - doorSelectionGreedTrapLastSeenAt < TimeSpan.FromSeconds(2))
             {
                 AutoTreasureHuntStatus = "选门：强欲页面正在切换，等待卡牌界面。";
+                return true;
+            }
+
+            if (doorSelectionGreedTrapChallengeAccepted &&
+                now - doorSelectionGreedTrapChallengeAcceptedAt < TimeSpan.FromSeconds(8))
+            {
+                AutoTreasureHuntStatus = "选门：挑战已接受，等待强欲卡牌界面完成切换。";
+                return true;
+            }
+
+            if (TryFindDoorSelectionGreedTrapNotice(out var noticeAddonName, out _))
+            {
+                doorSelectionGreedTrapPageDetected = true;
+                doorSelectionGreedTrapNoticeSeenAt = now;
+                doorSelectionGreedTrapLastSeenAt = now;
+                doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(500);
+                AutoTreasureHuntStatus = "选门：检测到“强欲陷阱”通知，等待完整解除页面出现。";
                 return true;
             }
 
@@ -6700,22 +7392,46 @@ public sealed class Plugin : IDalamudPlugin
             return true;
         }
 
+        var isHighLowAddon = string.Equals(addonName, "TreasureHighLow", StringComparison.OrdinalIgnoreCase);
+        var isCardPage = isHighLowAddon || IsStrongDoorSelectionCardPage(addonText) ||
+                         doorSelectionGreedTrapChallengeAccepted &&
+                         string.Equals(addonName, doorSelectionGreedTrapAddonName, StringComparison.OrdinalIgnoreCase) &&
+                         !IsStrongDoorSelectionGreedTrapPrompt(addonText);
         var normalizedAddonText = NormalizeDoorSelectionGreedTrapText(addonText);
-        var hasChallengePrompt = normalizedAddonText.Contains("挑战解除陷阱", StringComparison.Ordinal) ||
-                                  normalizedAddonText.Contains("挑战", StringComparison.Ordinal) &&
-                                  normalizedAddonText.Contains("解除", StringComparison.Ordinal) ||
-                                  normalizedAddonText.Contains("挑戦", StringComparison.Ordinal) &&
-                                  normalizedAddonText.Contains("解除", StringComparison.Ordinal) ||
+        var hasChallengePrompt = IsStrongDoorSelectionGreedTrapPrompt(addonText) ||
                                   normalizedAddonText.Contains("challenge", StringComparison.Ordinal) &&
                                   (normalizedAddonText.Contains("disarm", StringComparison.Ordinal) ||
                                    normalizedAddonText.Contains("remove", StringComparison.Ordinal));
-        if (!doorSelectionGreedTrapChallengeAccepted && hasChallengePrompt)
+        if (doorSelectionGreedTrapChallengeAccepted && hasChallengePrompt &&
+            now - doorSelectionGreedTrapChallengeAcceptedAt >= TimeSpan.FromSeconds(2))
         {
-            if (addon->FireCallbackInt(0))
+            doorSelectionGreedTrapChallengeAccepted = false;
+            doorSelectionGreedTrapChallengeAcceptedAt = default;
+            doorSelectionGreedTrapNextActionAt = now;
+        }
+
+        if (hasChallengePrompt)
+        {
+            if (doorSelectionGreedTrapChallengeAccepted)
+            {
+                AutoTreasureHuntStatus = "选门：挑战回调已发送，等待挑战提示消失并显示新卡牌。";
+                doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(300);
+                return true;
+            }
+
+            doorSelectionGreedTrapPreChallengeNumbers ??= ReadDoorSelectionHighLowNumberArray();
+            greedCardImageSignatureBeforeChallenge = DescribeDoorSelectionImageNodeDetails(addon);
+            doorSelectionGreedTrapRefreshedCardValue = 0;
+            doorSelectionGreedTrapCardValueRefreshedAt = default;
+            doorSelectionGreedTrapPreviousRefreshIntegers.Clear();
+            var clickedChallengeButton = TryFireDoorSelectionChallengeButton(addon, out _);
+
+            if (clickedChallengeButton)
             {
                 doorSelectionGreedTrapChallengeAccepted = true;
-                doorSelectionGreedTrapNextActionAt = DateTime.UtcNow.AddSeconds(1);
-                AutoTreasureHuntStatus = "选门：检测到强欲陷阱，已选择挑战解除陷阱。";
+                doorSelectionGreedTrapChallengeAcceptedAt = now;
+                doorSelectionGreedTrapNextActionAt = DateTime.UtcNow.AddMilliseconds(900);
+                AutoTreasureHuntStatus = "选门：已触发挑战解除陷阱按钮事件，等待 TreasureHighLow 卡牌界面。";
             }
             else
             {
@@ -6733,7 +7449,20 @@ public sealed class Plugin : IDalamudPlugin
             return true;
         }
 
+        if (!isCardPage)
+        {
+            AutoTreasureHuntStatus = $"选门：已接受强欲挑战，等待卡牌界面（当前 Addon {addonName}）。";
+            doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(300);
+            return true;
+        }
+
         doorSelectionGreedTrapLeftCardValue = TryReadDoorSelectionLeftCardValue(addon);
+        if (doorSelectionGreedTrapLeftCardValue is < 1 or > 9 &&
+            doorSelectionGreedTrapCardValueRefreshedAt != default &&
+            now - doorSelectionGreedTrapCardValueRefreshedAt <= TimeSpan.FromSeconds(5))
+        {
+            doorSelectionGreedTrapLeftCardValue = doorSelectionGreedTrapRefreshedCardValue;
+        }
         if (doorSelectionGreedTrapLeftCardValue is < 1 or > 9)
         {
             AutoTreasureHuntStatus = "选门：强欲陷阱已解除，正在读取左侧卡牌点数。";
@@ -6825,12 +7554,89 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         AutoTreasureHuntStatus = $"选门：已交互{GetDoorSelectionGreedTrapChoiceName(choice)}物体，等待强欲页面关闭。";
-        doorSelectionGreedTrapChallengeAccepted = false;
-        doorSelectionGreedTrapLeftCardValue = 0;
-        doorSelectionGreedTrapChoice = null;
-        doorSelectionGreedTrapNextActionAt = now.AddSeconds(1);
+        doorSelectionGreedTrapConfirmationPending = true;
+        AutoTreasureHuntStatus =
+            $"选门：第 {doorSelectionGreedTrapRoundsCompleted + 1}/5 次已交互{GetDoorSelectionGreedTrapChoiceName(choice)}，等待确认。";
         ResetDoorSelectionGreedTrapObjectTarget();
         return true;
+    }
+
+    private static unsafe bool TryFireDoorSelectionChallengeButton(AtkUnitBase* addon, out string route)
+    {
+        route = string.Empty;
+        if (addon == null)
+            return false;
+
+        if (TryFireDoorSelectionSelectStringChallenge(addon))
+        {
+            route = "SelectString ListItemClick";
+            return true;
+        }
+
+        if (addon->UldManager.NodeList == null)
+            return false;
+
+        for (var index = 0; index < addon->UldManager.NodeListCount; index++)
+        {
+            var textNode = addon->UldManager.NodeList[index];
+            if (textNode == null || textNode->Type != NodeType.Text)
+                continue;
+
+            var text = NormalizeDoorSelectionGreedTrapText(
+                ((AtkTextNode*)textNode)->NodeText.ToString());
+            if (!IsStrongDoorSelectionGreedTrapPrompt(text))
+                continue;
+
+            // ScreenInfoBack buttons are wired through their registered node
+            // events rather than a SelectString-style callback index.
+            for (var buttonNode = textNode; buttonNode != null; buttonNode = buttonNode->ParentNode)
+            {
+                for (var evt = buttonNode->AtkEventManager.Event; evt != null; evt = evt->NextEvent)
+                {
+                    if (evt->State.EventType != AtkEventType.ButtonClick || evt->Listener == null)
+                        continue;
+
+                    evt->Listener->ReceiveEvent(
+                        AtkEventType.ButtonClick,
+                        (int)evt->Param,
+                        evt,
+                        null);
+                    route = $"ButtonClick node={buttonNode->NodeId} param={evt->Param}";
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static unsafe bool TryFireDoorSelectionSelectStringChallenge(AtkUnitBase* addon)
+    {
+        if (!string.Equals(ReadAddonName(addon), "SelectString", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var selectString = (AddonSelectString*)addon;
+        var popupMenu = &selectString->PopupMenu;
+        if (popupMenu->EntryNames == null || popupMenu->List == null || popupMenu->EntryCount <= 0)
+            return false;
+
+        var itemCount = Math.Min(popupMenu->EntryCount, popupMenu->List->GetItemCount());
+        for (var index = 0; index < itemCount; index++)
+        {
+            var entryText = NormalizeDoorSelectionGreedTrapText(popupMenu->EntryNames[index].ToString());
+            var isChallengeEntry = IsStrongDoorSelectionGreedTrapPrompt(entryText) ||
+                                   entryText.Contains("challenge", StringComparison.Ordinal) &&
+                                   (entryText.Contains("disarm", StringComparison.Ordinal) ||
+                                    entryText.Contains("remove", StringComparison.Ordinal));
+            if (!isChallengeEntry)
+                continue;
+
+            popupMenu->List->SelectItem(index, dispatchEvent: false);
+            popupMenu->List->DispatchItemEvent(index, AtkEventType.ListItemClick);
+            return true;
+        }
+
+        return false;
     }
 
     private static DoorSelectionGreedTrapChoice GetDoorSelectionGreedTrapChoice(int cardValue)
@@ -6849,8 +7655,12 @@ public sealed class Plugin : IDalamudPlugin
     private Dalamud.Game.ClientState.Objects.Types.IGameObject? FindDoorSelectionGreedTrapChoiceObject(
         DoorSelectionGreedTrapChoice choice)
     {
+        var expectedBaseId = choice == DoorSelectionGreedTrapChoice.Large
+            ? DoorSelectionGreedTrapLargeBaseId
+            : DoorSelectionGreedTrapSmallBaseId;
         return objectTable
             .Where(gameObject => gameObject.IsTargetable &&
+                gameObject.BaseId == expectedBaseId &&
                 IsDoorSelectionGreedTrapChoiceObject(gameObject, choice))
             .OrderBy(gameObject => System.Numerics.Vector3.DistanceSquared(
                 objectTable.LocalPlayer?.Position ?? gameObject.Position,
@@ -6864,6 +7674,14 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (!string.Equals(gameObject.ObjectKind.ToString(), "EventObj", StringComparison.OrdinalIgnoreCase))
             return false;
+
+        if (gameObject.BaseId is DoorSelectionGreedTrapLargeBaseId or DoorSelectionGreedTrapSmallBaseId)
+        {
+            var expectedBaseId = choice == DoorSelectionGreedTrapChoice.Large
+                ? DoorSelectionGreedTrapLargeBaseId
+                : DoorSelectionGreedTrapSmallBaseId;
+            return gameObject.BaseId == expectedBaseId;
+        }
 
         var name = NormalizeDoorSelectionGreedTrapText(gameObject.Name.TextValue);
         if (string.IsNullOrWhiteSpace(name) ||
@@ -6909,12 +7727,41 @@ public sealed class Plugin : IDalamudPlugin
         pageHasGreedTrapSignal = false;
 
         var checkedAddons = new HashSet<nint>();
-        if (!string.IsNullOrWhiteSpace(doorSelectionGreedTrapAddonName))
+        // Prefer the actual challenge prompt over the card addon. Both may be
+        // loaded at once, but only the prompt page owns the challenge action.
+        var unitManager = RaptureAtkUnitManager.Instance();
+        if (unitManager != null)
         {
-            var trackedCandidate = gameGui.GetAddonByName<AtkUnitBase>(doorSelectionGreedTrapAddonName);
+            var promptUnits = &unitManager->AllLoadedUnitsList;
+            var promptUnitCount = Math.Min((int)promptUnits->Count, 256);
+            for (var index = 0; index < promptUnitCount; index++)
+            {
+                var candidate = *(AtkUnitBase**)((byte*)promptUnits + 8 + index * sizeof(nint));
+                if (candidate == null || !candidate->IsReady ||
+                    (!candidate->IsVisible && candidate->NumBlockingAddons == 0))
+                {
+                    continue;
+                }
+
+                var candidateText = ReadAddonText(candidate);
+                if (!IsStrongDoorSelectionGreedTrapPrompt(candidateText))
+                    continue;
+
+                addon = candidate;
+                addonName = ReadAddonName(candidate);
+                addonText = candidateText;
+                pageHasGreedTrapSignal = true;
+                doorSelectionGreedTrapNextFullScanAt = DateTime.MinValue;
+                return true;
+            }
+        }
+
+        for (var instance = 1; instance <= 8; instance++)
+        {
+            var highLowCandidate = gameGui.GetAddonByName<AtkUnitBase>("TreasureHighLow", instance);
             if (TryAcceptDoorSelectionGreedTrapAddon(
-                    trackedCandidate,
-                    doorSelectionGreedTrapAddonName,
+                    highLowCandidate,
+                    "TreasureHighLow",
                     checkedAddons,
                     out addon,
                     out addonName,
@@ -6925,26 +7772,48 @@ public sealed class Plugin : IDalamudPlugin
             }
         }
 
+        if (!string.IsNullOrWhiteSpace(doorSelectionGreedTrapAddonName))
+        {
+            for (var instance = 1; instance <= 8; instance++)
+            {
+                var trackedCandidate = gameGui.GetAddonByName<AtkUnitBase>(
+                    doorSelectionGreedTrapAddonName, instance);
+                if (TryAcceptDoorSelectionGreedTrapAddon(
+                        trackedCandidate,
+                        doorSelectionGreedTrapAddonName,
+                        checkedAddons,
+                        out addon,
+                        out addonName,
+                        out addonText,
+                        out pageHasGreedTrapSignal))
+                {
+                    return true;
+                }
+            }
+        }
+
         foreach (var knownName in DoorSelectionGreedTrapAddonNames)
         {
-            var candidate = gameGui.GetAddonByName<AtkUnitBase>(knownName);
-            if (TryAcceptDoorSelectionGreedTrapAddon(
-                    candidate,
-                    knownName,
-                    checkedAddons,
-                    out addon,
-                    out addonName,
-                    out addonText,
-                    out pageHasGreedTrapSignal))
+            for (var instance = 1; instance <= 8; instance++)
             {
-                return true;
+                var candidate = gameGui.GetAddonByName<AtkUnitBase>(knownName, instance);
+                if (TryAcceptDoorSelectionGreedTrapAddon(
+                        candidate,
+                        knownName,
+                        checkedAddons,
+                        out addon,
+                        out addonName,
+                        out addonText,
+                        out pageHasGreedTrapSignal))
+                {
+                    return true;
+                }
             }
         }
 
         // A custom duty UI does not have a stable public Addon name across
         // client updates. Inspect the loaded addon list as a fallback so the
         // visible page in the screenshot is what triggers this state.
-        var unitManager = RaptureAtkUnitManager.Instance();
         if (unitManager == null || DateTime.UtcNow < doorSelectionGreedTrapNextFullScanAt)
             return false;
 
@@ -6972,6 +7841,74 @@ public sealed class Plugin : IDalamudPlugin
         return false;
     }
 
+    private unsafe bool TryFindDoorSelectionGreedTrapNotice(
+        out string addonName,
+        out string addonText)
+    {
+        addonName = string.Empty;
+        addonText = string.Empty;
+        var unitManager = RaptureAtkUnitManager.Instance();
+        if (unitManager == null)
+            return false;
+
+        var loadedUnits = &unitManager->AllLoadedUnitsList;
+        var loadedUnitCount = Math.Min((int)loadedUnits->Count, 256);
+        for (var index = 0; index < loadedUnitCount; index++)
+        {
+            var candidate = *(AtkUnitBase**)((byte*)loadedUnits + 8 + index * sizeof(nint));
+            if (candidate == null || !candidate->IsReady)
+                continue;
+
+            var text = ReadAddonText(candidate);
+            var normalized = NormalizeDoorSelectionGreedTrapText(text);
+            var hasChineseNotice =
+                (normalized.Contains("强欲", StringComparison.Ordinal) ||
+                 normalized.Contains("強欲", StringComparison.Ordinal) ||
+                 normalized.Contains("贪欲", StringComparison.Ordinal)) &&
+                (normalized.Contains("陷阱", StringComparison.Ordinal) ||
+                 normalized.Contains("罠", StringComparison.Ordinal));
+            var hasEnglishNotice = normalized.Contains("greed", StringComparison.Ordinal) &&
+                                   normalized.Contains("trap", StringComparison.Ordinal);
+            if (!hasChineseNotice && !hasEnglishNotice)
+                continue;
+
+            addonName = ReadAddonName(candidate);
+            addonText = text;
+            return true;
+        }
+
+        return false;
+    }
+
+    private unsafe string DescribeDoorSelectionActiveAddons()
+    {
+        var unitManager = RaptureAtkUnitManager.Instance();
+        if (unitManager == null)
+            return string.Empty;
+
+        var loadedUnits = &unitManager->AllLoadedUnitsList;
+        var loadedUnitCount = Math.Min((int)loadedUnits->Count, 256);
+        var descriptions = new List<string>();
+        for (var index = 0; index < loadedUnitCount && descriptions.Count < 12; index++)
+        {
+            var candidate = *(AtkUnitBase**)((byte*)loadedUnits + 8 + index * sizeof(nint));
+            if (candidate == null || !candidate->IsReady)
+                continue;
+
+            var name = ReadAddonName(candidate);
+            var text = NormalizeDoorSelectionGreedTrapText(ReadAddonText(candidate));
+            if (!candidate->IsVisible && string.IsNullOrWhiteSpace(text))
+                continue;
+
+            var preview = text.Length > 42 ? text[..42] + "..." : text;
+            descriptions.Add(string.IsNullOrWhiteSpace(preview)
+                ? $"{name}(visible={candidate->IsVisible})"
+                : $"{name}:{preview}");
+        }
+
+        return string.Join(" | ", descriptions);
+    }
+
     private unsafe bool TryAcceptDoorSelectionGreedTrapAddon(
         AtkUnitBase* candidate,
         string candidateName,
@@ -6986,18 +7923,41 @@ public sealed class Plugin : IDalamudPlugin
         addonText = string.Empty;
         pageHasGreedTrapSignal = false;
 
-        if (candidate == null || !candidate->IsReady || !candidate->IsVisible)
+        if (candidate == null || !candidate->IsReady)
             return false;
 
         var address = (nint)candidate;
         if (!checkedAddons.Add(address))
             return false;
 
+        // SelectString and the duty's custom panel can be shown during a short
+        // transition where IsVisible is still false. The text is already
+        // populated in that state, so read it before applying visibility
+        // filtering instead of losing the only detection tick.
         var text = ReadAddonText(candidate);
         var hasSignal = IsDoorSelectionGreedTrapPageText(text);
         var isKnownGreedTrapAddon = DoorSelectionGreedTrapAddonNames.Contains(
             candidateName,
             StringComparer.OrdinalIgnoreCase);
+        var isHighLowAddon = string.Equals(candidateName, "TreasureHighLow", StringComparison.OrdinalIgnoreCase);
+        var isScreenInfoBack = string.Equals(candidateName, "_ScreenInfoBack", StringComparison.OrdinalIgnoreCase);
+        var isCardPage = IsStrongDoorSelectionCardPage(text);
+        if (isScreenInfoBack && candidate->IsVisible)
+            hasSignal = true;
+        if (isHighLowAddon && candidate->IsVisible)
+        {
+            hasSignal = true;
+            isCardPage = true;
+        }
+        if (isCardPage && isKnownGreedTrapAddon)
+            hasSignal = true;
+
+        if (!candidate->IsVisible && candidate->NumBlockingAddons == 0 &&
+            !hasSignal && !isCardPage)
+        {
+            return false;
+        }
+
         if (hasSignal && !isKnownGreedTrapAddon &&
             !IsStrongDoorSelectionGreedTrapPrompt(text) &&
             candidate->NumBlockingAddons == 0)
@@ -7020,6 +7980,28 @@ public sealed class Plugin : IDalamudPlugin
         return true;
     }
 
+    private static bool IsStrongDoorSelectionCardPage(string text)
+    {
+        var normalized = NormalizeDoorSelectionGreedTrapText(text);
+        if (normalized.Length == 0 ||
+            (!normalized.Contains("大", StringComparison.Ordinal) &&
+             !normalized.Contains("小", StringComparison.Ordinal) &&
+             !normalized.Contains("large", StringComparison.Ordinal) &&
+             !normalized.Contains("small", StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        var numericValues = 0;
+        foreach (var character in normalized)
+        {
+            if (character is >= '1' and <= '9')
+                numericValues++;
+        }
+
+        return numericValues > 0;
+    }
+
     private static bool IsDoorSelectionGreedTrapPageText(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -7040,20 +8022,30 @@ public sealed class Plugin : IDalamudPlugin
                         normalized.Contains("解 除", StringComparison.Ordinal) ||
                         normalized.Contains("disarm", StringComparison.Ordinal) ||
                         normalized.Contains("remove", StringComparison.Ordinal);
+        var hasRewardLayout = normalized.Contains("当前财宝获得数量", StringComparison.Ordinal) ||
+                              normalized.Contains("解除成功后财宝获得数量", StringComparison.Ordinal);
 
         // The screenshot page is identified by its challenge/disarm prompt,
         // while the title may be localized independently.
-        return (hasGreed || hasTrap) && (hasChallenge || hasDisarm);
+        return (hasGreed || hasTrap || hasRewardLayout) &&
+               (hasChallenge || hasDisarm || hasRewardLayout);
     }
 
     private static bool IsStrongDoorSelectionGreedTrapPrompt(string text)
     {
         var normalized = NormalizeDoorSelectionGreedTrapText(text);
-        return normalized.Contains("挑战解除陷阱", StringComparison.Ordinal) ||
-               normalized.Contains("挑战解除", StringComparison.Ordinal) &&
-               normalized.Contains("陷阱", StringComparison.Ordinal) ||
-               normalized.Contains("challenge", StringComparison.Ordinal) &&
-               normalized.Contains("trap", StringComparison.Ordinal);
+        var hasChallenge = normalized.Contains("挑战", StringComparison.Ordinal) ||
+                           normalized.Contains("challenge", StringComparison.Ordinal);
+        var hasTrap = normalized.Contains("陷阱", StringComparison.Ordinal) ||
+                      normalized.Contains("trap", StringComparison.Ordinal);
+        var hasDisarm = normalized.Contains("解除", StringComparison.Ordinal) ||
+                        normalized.Contains("disarm", StringComparison.Ordinal) ||
+                        normalized.Contains("remove", StringComparison.Ordinal);
+
+        // The prompt has appeared as both "挑战解除陷阱" and
+        // "挑战第N次的陷阱解除"; don't depend on a single word order.
+        return hasChallenge && hasTrap && hasDisarm ||
+               hasChallenge && hasDisarm && normalized.Contains("陷阱解除", StringComparison.Ordinal);
     }
 
     private static string NormalizeDoorSelectionGreedTrapText(string text)
@@ -7082,65 +8074,393 @@ public sealed class Plugin : IDalamudPlugin
     {
         doorSelectionGreedTrapNextActionAt = default;
         doorSelectionGreedTrapChallengeAccepted = false;
+        doorSelectionGreedTrapChallengeAcceptedAt = default;
+        doorSelectionGreedTrapPreChallengeNumbers = null;
         doorSelectionGreedTrapLeftCardValue = 0;
+        doorSelectionGreedTrapRefreshedCardValue = 0;
+        doorSelectionGreedTrapCardValueRefreshedAt = default;
+        doorSelectionGreedTrapPreviousRefreshIntegers.Clear();
         doorSelectionGreedTrapChoice = null;
         ResetDoorSelectionGreedTrapObjectTarget();
         doorSelectionGreedTrapPageDetected = false;
         doorSelectionGreedTrapAddonName = string.Empty;
         doorSelectionGreedTrapLastSeenAt = default;
+        doorSelectionGreedTrapNoticeSeenAt = default;
         doorSelectionGreedTrapNextFullScanAt = default;
     }
 
     private static unsafe string ReadAddonText(AtkUnitBase* addon)
     {
-        if (addon == null || addon->UldManager.NodeList == null)
+        if (addon == null)
             return string.Empty;
 
         var parts = new List<string>();
-        for (var index = 0; index < addon->UldManager.NodeListCount; index++)
+        var visited = new HashSet<nint>();
+        CollectAddonText(addon->UldManager.RootNode, parts, visited);
+        for (var index = 0;
+             addon->UldManager.NodeList != null && index < addon->UldManager.NodeListCount;
+             index++)
         {
             var node = addon->UldManager.NodeList[index];
-            if (node == null || node->Type != NodeType.Text)
-                continue;
+            CollectAddonText(node, parts, visited);
+        }
 
-            var text = ((AtkTextNode*)node)->NodeText.ToString();
-            if (!string.IsNullOrWhiteSpace(text))
-                parts.Add(text);
+        // A number of standard selection addons keep localized labels in
+        // AtkValues and only copy them into text nodes during a later refresh.
+        // Include those values so the scan works in both states.
+        if (addon->AtkValues != null)
+        {
+            for (var index = 0; index < addon->AtkValuesCount; index++)
+            {
+                var value = addon->AtkValues[index];
+                if (value.Type is AtkValueType.String or
+                    AtkValueType.ManagedString or
+                    AtkValueType.String8 or
+                    AtkValueType.WideString)
+                {
+                    var valueText = value.GetValueAsString();
+                    if (!string.IsNullOrWhiteSpace(valueText))
+                        parts.Add(valueText);
+                }
+            }
         }
 
         return string.Join(" ", parts);
     }
 
-    private static unsafe int TryReadDoorSelectionLeftCardValue(AtkUnitBase* addon)
+    private static unsafe void CollectAddonText(
+        AtkResNode* node,
+        List<string> parts,
+        HashSet<nint> visited)
     {
-        if (addon == null || addon->UldManager.NodeList == null)
+        if (node == null || !visited.Add((nint)node))
+            return;
+
+        if (node->Type == NodeType.Text)
+        {
+            var text = ((AtkTextNode*)node)->NodeText.ToString();
+            if (!string.IsNullOrWhiteSpace(text))
+                parts.Add(text);
+        }
+
+        CollectAddonText(node->ChildNode, parts, visited);
+        CollectAddonText(node->NextSiblingNode, parts, visited);
+    }
+
+    private unsafe int TryReadDoorSelectionLeftCardValue(AtkUnitBase* addon)
+    {
+        if (addon == null)
             return 0;
 
         var candidates = new List<(float X, int Value)>();
-        for (var index = 0; index < addon->UldManager.NodeListCount; index++)
+        var visited = new HashSet<nint>();
+        CollectDoorSelectionCardValues(addon->UldManager.RootNode, candidates, visited);
+        for (var index = 0;
+             addon->UldManager.NodeList != null && index < addon->UldManager.NodeListCount;
+             index++)
         {
             var node = addon->UldManager.NodeList[index];
-            if (node == null || node->Type != NodeType.Text)
-                continue;
-
-            var text = ((AtkTextNode*)node)->NodeText.ToString().Trim();
-            if (!int.TryParse(text, out var value) || value is < 1 or > 9)
-                continue;
-
-            candidates.Add((node->X, value));
+            CollectDoorSelectionCardValues(node, candidates, visited);
         }
 
-        if (candidates.Count == 0)
-            return 0;
-
-        // The card panel is laid out left-to-right. The first 1~9 text node in
-        // the left half is the exposed card point; reward quantities are lower
-        // in the panel and are ignored by this position check.
-        var leftMost = candidates
-            .Where(candidate => candidate.X <= candidates.Max(other => other.X) * 0.5f)
+        // The two visible card values are positioned in the addon. Their X
+        // coordinates are stronger evidence for the left card than guessing
+        // which NumberArray slot changed during the challenge transition.
+        var visibleValues = candidates
+            .Where(candidate => candidate.Value is >= 1 and <= 9)
+            .Distinct()
             .OrderBy(candidate => candidate.X)
-            .FirstOrDefault();
-        return leftMost.Value;
+            .ToArray();
+        if (visibleValues.Length > 0)
+            return visibleValues[0].Value;
+
+        return 0;
+    }
+
+    private static unsafe int[] ReadDoorSelectionHighLowNumberArray()
+    {
+        var atkStage = AtkStage.Instance();
+        var array = atkStage == null
+            ? null
+            : atkStage->GetNumberArrayData(NumberArrayType.TreasureHighLow);
+        if (array == null || array->IntArray == null || array->Size <= 0)
+            return [];
+
+        var count = Math.Min((int)array->Size, 64);
+        var values = new int[count];
+        for (var index = 0; index < count; index++)
+            values[index] = array->IntArray[index];
+
+        return values;
+    }
+
+    private static int[] GetDoorSelectionChangedCardValues(int[]? before, int[] after)
+    {
+        if (before == null || before.Length == 0 || after.Length == 0)
+            return [];
+
+        var commonLength = Math.Min(before.Length, after.Length);
+        return Enumerable.Range(0, commonLength)
+            .Where(index => before[index] != after[index] && after[index] is >= 1 and <= 9)
+            .Select(index => after[index])
+            .Distinct()
+            .Take(2)
+            .ToArray();
+    }
+
+    private static unsafe string DescribeDoorSelectionHighLowNumberArray()
+    {
+        var values = ReadDoorSelectionHighLowNumberArray();
+        if (values.Length == 0)
+            return "unavailable";
+
+        return string.Join(",", values.Select((value, index) => $"{index}:{value}"));
+    }
+
+    private static unsafe string DescribeDoorSelectionCandidateNumberArrays()
+    {
+        var atkStage = AtkStage.Instance();
+        if (atkStage == null)
+            return "candidate arrays=AtkStage unavailable";
+
+        var arrays = atkStage->GetNumberArrayData();
+        if (arrays == null)
+            return "candidate arrays=unavailable";
+
+        var descriptions = new List<string>();
+        for (var arrayIndex = 0; arrayIndex < 160 && descriptions.Count < 8; arrayIndex++)
+        {
+            var array = arrays[arrayIndex];
+            if (array == null || array->IntArray == null || array->Size <= 0 || array->Size > 32)
+                continue;
+
+            var values = new int[array->Size];
+            var cardValueCount = 0;
+            for (var index = 0; index < values.Length; index++)
+            {
+                values[index] = array->IntArray[index];
+                if (values[index] is >= 1 and <= 9)
+                    cardValueCount++;
+            }
+
+            if (cardValueCount is 0 or > 2)
+                continue;
+
+            descriptions.Add($"{arrayIndex}[{array->Size}]={string.Join(',', values)}");
+        }
+
+        return descriptions.Count == 0
+            ? "candidate arrays=none"
+            : "candidate arrays=" + string.Join(";", descriptions);
+    }
+
+    private unsafe string DescribeDoorSelectionCardCandidates(AtkUnitBase* addon)
+    {
+        if (addon == null)
+            return "卡牌文本候选=unavailable";
+
+        var candidates = new List<(float X, int Value)>();
+        var visited = new HashSet<nint>();
+        CollectDoorSelectionCardValues(addon->UldManager.RootNode, candidates, visited);
+        for (var index = 0;
+             addon->UldManager.NodeList != null && index < addon->UldManager.NodeListCount;
+             index++)
+        {
+            CollectDoorSelectionCardValues(addon->UldManager.NodeList[index], candidates, visited);
+        }
+
+        var textValues = candidates.Count == 0
+            ? "none"
+            : string.Join(",", candidates.Select(candidate => $"x{candidate.X:0}:{candidate.Value}"));
+        var atkValues = new List<string>();
+        for (var index = 0; addon->AtkValues != null && index < addon->AtkValuesCount && index < 64; index++)
+        {
+            var value = addon->AtkValues[index];
+            var number = value.Type switch
+            {
+                AtkValueType.Int => value.Int,
+                AtkValueType.UInt => (long)value.UInt,
+                AtkValueType.Int64 => value.Int64,
+                AtkValueType.UInt64 => value.UInt64 <= long.MaxValue ? (long)value.UInt64 : long.MaxValue,
+                _ => long.MinValue,
+            };
+            if (number != long.MinValue)
+                atkValues.Add($"{index}:{number}");
+        }
+
+        var changedValues = GetDoorSelectionChangedCardValues(
+            doorSelectionGreedTrapPreChallengeNumbers,
+            ReadDoorSelectionHighLowNumberArray());
+        return $"卡牌文本候选={textValues}；AtkValues={string.Join(",", atkValues)}；" +
+               $"挑战后数组变化候选={string.Join(",", changedValues)}";
+    }
+
+    private static unsafe string DescribeDoorSelectionImageNodeDetails(AtkUnitBase* addon)
+    {
+        if (addon == null)
+            return "imageDetails=unavailable";
+
+        var details = new List<(float X, float Y, string Text)>();
+        var visited = new HashSet<nint>();
+        CollectDoorSelectionImageNodeDetails(addon->UldManager.RootNode, details, visited);
+        for (var index = 0;
+             addon->UldManager.NodeList != null && index < addon->UldManager.NodeListCount;
+             index++)
+        {
+            CollectDoorSelectionImageNodeDetails(addon->UldManager.NodeList[index], details, visited);
+        }
+
+        return $"imageDetails={details.Count}[{string.Join(";", details.OrderBy(item => item.X).ThenBy(item => item.Y).Take(64).Select(item => item.Text))}]";
+    }
+
+    private static unsafe void CollectDoorSelectionImageNodeDetails(
+        AtkResNode* node,
+        List<(float X, float Y, string Text)> details,
+        HashSet<nint> visited)
+    {
+        if (node == null || !visited.Add((nint)node))
+            return;
+
+        if (node->Type == NodeType.Image)
+        {
+            var image = (AtkImageNode*)node;
+            var x = 0f;
+            var y = 0f;
+            for (var current = node; current != null; current = current->ParentNode)
+            {
+                x += current->X;
+                y += current->Y;
+            }
+
+            var parts = image->PartsList;
+            var partsInfo = parts == null ? "null" : $"{parts->Id}:{parts->PartCount}";
+            details.Add((x, y,
+                $"id{image->NodeId}@{x:0},{y:0}:part{image->PartId}:parts{partsInfo}:{image->Width}x{image->Height}"));
+        }
+
+        CollectDoorSelectionImageNodeDetails(node->ChildNode, details, visited);
+        CollectDoorSelectionImageNodeDetails(node->NextSiblingNode, details, visited);
+    }
+
+    private static unsafe string DescribeDoorSelectionImageNodes(AtkUnitBase* addon)
+    {
+        if (addon == null)
+            return "imageNodes=unavailable";
+
+        var positions = new List<(float X, float Y)>();
+        var visited = new HashSet<nint>();
+        CollectDoorSelectionImageNodes(addon->UldManager.RootNode, positions, visited);
+        for (var index = 0;
+             addon->UldManager.NodeList != null && index < addon->UldManager.NodeListCount;
+             index++)
+        {
+            CollectDoorSelectionImageNodes(addon->UldManager.NodeList[index], positions, visited);
+        }
+
+        var summary = positions
+            .OrderBy(position => position.X)
+            .ThenBy(position => position.Y)
+            .Take(48)
+            .Select(position => $"{position.X:0},{position.Y:0}");
+        return $"imageNodes={positions.Count}[{string.Join(";", summary)}]";
+    }
+
+    private static unsafe void CollectDoorSelectionImageNodes(
+        AtkResNode* node,
+        List<(float X, float Y)> positions,
+        HashSet<nint> visited)
+    {
+        if (node == null || !visited.Add((nint)node))
+            return;
+
+        if (node->Type == NodeType.Image)
+        {
+            var x = 0f;
+            var y = 0f;
+            for (var current = node; current != null; current = current->ParentNode)
+            {
+                x += current->X;
+                y += current->Y;
+            }
+            positions.Add((x, y));
+        }
+
+        CollectDoorSelectionImageNodes(node->ChildNode, positions, visited);
+        CollectDoorSelectionImageNodes(node->NextSiblingNode, positions, visited);
+    }
+
+    private static unsafe (int Index, int Value)[] ReadDoorSelectionCardAtkValueCandidates(AtkUnitBase* addon)
+    {
+        if (addon == null || addon->AtkValues == null)
+            return [];
+
+        var candidates = new List<(int Index, int Value)>();
+        for (var index = 0; index < addon->AtkValuesCount && index < 64; index++)
+        {
+            var value = addon->AtkValues[index];
+            var number = value.Type switch
+            {
+                AtkValueType.Int => value.Int,
+                AtkValueType.UInt when value.UInt <= int.MaxValue => (int)value.UInt,
+                _ => 0,
+            };
+            if (number is >= 1 and <= 9)
+                candidates.Add((index, number));
+        }
+
+        return candidates.ToArray();
+    }
+
+    private static unsafe void CollectDoorSelectionCardValues(
+        AtkResNode* node,
+        List<(float X, int Value)> candidates,
+        HashSet<nint> visited)
+    {
+        if (node == null || !visited.Add((nint)node))
+            return;
+
+        if (node->Type == NodeType.Text)
+        {
+            var text = ((AtkTextNode*)node)->NodeText.ToString().Trim();
+            if (int.TryParse(text, out var value) && value is >= 1 and <= 9)
+                candidates.Add((GetDoorSelectionCardNodeX(node), value));
+            else if (TryExtractSingleCardDigit(text, out value))
+                candidates.Add((GetDoorSelectionCardNodeX(node), value));
+        }
+
+        CollectDoorSelectionCardValues(node->ChildNode, candidates, visited);
+        CollectDoorSelectionCardValues(node->NextSiblingNode, candidates, visited);
+    }
+
+    private static unsafe float GetDoorSelectionCardNodeX(AtkResNode* node)
+    {
+        var x = 0f;
+        for (var current = node; current != null; current = current->ParentNode)
+            x += current->X;
+
+        return x;
+    }
+
+    private static bool TryExtractSingleCardDigit(string text, out int value)
+    {
+        value = 0;
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var normalized = NormalizeDoorSelectionGreedTrapText(text);
+        var hasCardHint = normalized.Contains("卡", StringComparison.Ordinal) ||
+                          normalized.Contains("牌", StringComparison.Ordinal) ||
+                          normalized.Contains("点数", StringComparison.Ordinal) ||
+                          normalized.Contains("card", StringComparison.Ordinal);
+        if (!hasCardHint)
+            return false;
+
+        var digit = normalized.FirstOrDefault(character => character is >= '1' and <= '9');
+        if (digit == default)
+            return false;
+
+        value = digit - '0';
+        return true;
     }
 
     private void ResetDoorSelectionExitTarget()
@@ -7172,6 +8492,12 @@ public sealed class Plugin : IDalamudPlugin
         if (inCombat)
         {
             doorSelectionCombatStartedThisFloor = true;
+            if (doorSelectionFloor == 5)
+            {
+                commandManager.ProcessCommand("/vnav stop");
+                doorSelectionFloorFiveEnemyEntityId = 0;
+                doorSelectionFloorFiveEnemyMoveIssued = false;
+            }
             if (doorSelectionPostCombatChestPending)
             {
                 doorSelectionPostCombatChestInteractAcceptedEntities.Clear();
@@ -7250,10 +8576,11 @@ public sealed class Plugin : IDalamudPlugin
         ResetDoorSelectionChestTarget();
         doorSelectionRuntimeChoiceFloor = 0;
         doorSelectionRuntimeChoice = null;
-        doorSelectionVfxTravelUntil = default;
+        ResetDoorSelectionVfxTravelState();
         confirmDoorSelectionDoorPending = false;
         doorSelectionDoorConfirmDeadline = default;
         doorSelectionDoorYesConfirmed = false;
+        doorSelectionDoorAnimationSkipArmed = false;
         confirmDoorSelectionChestPending = false;
         doorSelectionChestConfirmDeadline = default;
         doorSelectionDutyReadyAt = default;

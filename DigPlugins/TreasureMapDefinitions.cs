@@ -35,6 +35,7 @@ internal static class TreasureMapDefinitions
     internal static readonly List<TreasureMapOption> DoorSelectionTreasureMapOptions =
     [
         new("陈旧的狞豹革地图（G17测试中）", "狩豹革制的宝物地图", MarketSearchName: "陈旧的狞豹革地图", MapItemId: 43557, TaskItemId: 2003563, Route: TreasureMapRoute.DoorSelection),
+        new("陈旧的特殊地图5（G17）", "陈旧的特殊地图5", MarketSearchName: "陈旧的特殊地图5", MapItemId: 44349, TaskItemId: 2003704, Route: TreasureMapRoute.DoorSelection),
     ];
 
     // 【合并列表】界面选择、背包统计、补图购买统一使用；不直接在这里添加地图。
@@ -76,7 +77,7 @@ internal static class TreasureMapDefinitions
     internal static readonly List<uint> DoorSelectionCombatStartChestFloor2BaseIds = [2013861];
     internal static readonly List<uint> DoorSelectionCombatStartChestFloor3BaseIds = [2013862];
     internal static readonly List<uint> DoorSelectionCombatStartChestFloor4BaseIds = [2013863];
-    internal static readonly List<uint> DoorSelectionCombatStartChestFloor5BaseIds = [2013864];
+    internal static readonly List<uint> DoorSelectionCombatStartChestFloor5BaseIds = [];
 
     // 896 副本各层战斗结束后出现的宝箱 BaseID。请按实际测试结果填入；
     // 若该层宝箱没有 BaseID，可留空并由运行时按名称“宝箱”兜底识别。
