@@ -2566,11 +2566,14 @@ public sealed class MainWindow
         var textColor = selected
             ? AemeathInk
             : enabled ? AemeathBodyInk : AemeathBodyMuted;
-        var labelY = string.IsNullOrEmpty(subtitle) ? (size.Y - ImGui.GetTextLineHeight()) * 0.5f : 7f;
-        drawList.AddText(topLeft + new Vector2(14f, labelY), ImGui.GetColorU32(textColor), label);
+        var labelSize = ImGui.CalcTextSize(label);
+        var labelY = string.IsNullOrEmpty(subtitle) ? (size.Y - labelSize.Y) * 0.5f : 5f;
+        drawList.AddText(topLeft + new Vector2((size.X - labelSize.X) * 0.5f, labelY),
+            ImGui.GetColorU32(textColor), label);
         if (!string.IsNullOrEmpty(subtitle))
         {
-            drawList.AddText(topLeft + new Vector2(14f, 26f),
+            var subtitleSize = ImGui.CalcTextSize(subtitle);
+            drawList.AddText(topLeft + new Vector2((size.X - subtitleSize.X) * 0.5f, 25f),
                 ImGui.GetColorU32(enabled ? AemeathMuted : new Vector4(0.52f, 0.55f, 0.63f, 0.72f)),
                 subtitle);
         }
@@ -2611,8 +2614,13 @@ public sealed class MainWindow
         drawList.AddRectFilled(topLeft + new Vector2(5f, 3f),
             new Vector2(topLeft.X + size.X - 5f, topLeft.Y + 4f),
             ImGui.GetColorU32(new Vector4(1.00f, 0.88f, 0.96f, enabled ? 0.24f : 0.10f)));
-        drawList.AddText(topLeft + new Vector2(12f, Math.Max(4f, (size.Y - ImGui.GetTextLineHeight()) * 0.5f)),
-            ImGui.GetColorU32(enabled ? AemeathInk : AemeathMuted), label);
+        var textSize = ImGui.CalcTextSize(label);
+        var textPosition = topLeft + new Vector2(
+            Math.Max(8f, (size.X - textSize.X) * 0.5f),
+            Math.Max(0f, (size.Y - textSize.Y) * 0.5f));
+        drawList.PushClipRect(topLeft + new Vector2(5f, 2f), topLeft + size - new Vector2(5f, 2f), true);
+        drawList.AddText(textPosition, ImGui.GetColorU32(enabled ? AemeathInk : AemeathMuted), label);
+        drawList.PopClipRect();
         return clicked;
     }
 
@@ -2868,6 +2876,8 @@ public sealed class MainWindow
             plugin.IsAutoTreasureHuntEnabled ? RunningColor : StoppedColor,
             plugin.IsAutoTreasureHuntEnabled ? "已开启" : "未开启");
 
+        DrawLootRollSettings();
+
         if (plugin.IsWheelLogicSelected)
         {
             ImGui.Spacing();
@@ -2954,6 +2964,10 @@ public sealed class MainWindow
         DrawDoorChoice("第二层 → 第三层", 1);
         DrawDoorChoice("第三层 → 第四层", 2);
         DrawDoorChoice("第四层 → 第五层", 3);
+        ImGui.Spacing();
+        ImGui.TextColored(AemeathGold, "GREED TRAP");
+        ImGui.TextDisabled("选择强欲陷阱卡牌的处理方式。");
+        DrawDoorSelectionGreedTrapPolicy();
     }
 
     private void DrawDoorChoice(string label, int floor)
@@ -2966,6 +2980,53 @@ public sealed class MainWindow
         ImGui.SameLine(278);
         if (DrawAemeathRadio($"DoorRight{floor}", "右门", value == DoorSelectionChoice.Right, true, 82f))
             plugin.SetDoorSelectionChoice(floor, DoorSelectionChoice.Right);
+    }
+
+    private void DrawDoorSelectionGreedTrapPolicy()
+    {
+        var policy = plugin.DoorSelectionGreedTrapPolicy;
+        ImGui.Text("强欲策略");
+        ImGui.SameLine(190);
+        if (DrawAemeathRadio("DoorGreedTrapAskMe", "我自己选",
+                policy == DoorSelectionGreedTrapPolicy.AskMe, true, 90f))
+        {
+            plugin.SetDoorSelectionGreedTrapPolicy(DoorSelectionGreedTrapPolicy.AskMe);
+        }
+
+        ImGui.SameLine(278);
+        if (DrawAemeathRadio("DoorGreedTrapOpenCoffer", "直接开箱",
+                policy == DoorSelectionGreedTrapPolicy.OpenCoffer, true, 112f))
+        {
+            plugin.SetDoorSelectionGreedTrapPolicy(DoorSelectionGreedTrapPolicy.OpenCoffer);
+        }
+
+        ImGui.SameLine(396);
+        if (DrawAemeathRadio("DoorGreedTrapAuto", "按奖励自动挑战",
+                policy == DoorSelectionGreedTrapPolicy.Auto, true, 150f))
+        {
+            plugin.SetDoorSelectionGreedTrapPolicy(DoorSelectionGreedTrapPolicy.Auto);
+        }
+    }
+
+    private void DrawLootRollSettings()
+    {
+        ImGui.Spacing();
+        ImGui.TextColored(AemeathGold, "战利品投票");
+        ImGui.TextDisabled("设置宝箱战利品的投票方式。");
+        var policy = plugin.LootRollPolicy;
+        ImGui.Text("投票策略");
+        ImGui.SameLine(190);
+        if (DrawAemeathRadio("LootRollNeed", "需求", policy == LootRoll.Need, true, 76f))
+            plugin.SetLootRollPolicy(LootRoll.Need);
+        ImGui.SameLine(272);
+        if (DrawAemeathRadio("LootRollGreed", "贪婪", policy == LootRoll.Greed, true, 82f))
+            plugin.SetLootRollPolicy(LootRoll.Greed);
+        ImGui.SameLine(360);
+        if (DrawAemeathRadio("LootRollPass", "放弃", policy == LootRoll.Pass, true, 76f))
+            plugin.SetLootRollPolicy(LootRoll.Pass);
+        ImGui.SameLine(442);
+        if (DrawAemeathRadio("LootRollManual", "手动", policy == LootRoll.Manual, true, 92f))
+            plugin.SetLootRollPolicy(LootRoll.Manual);
     }
 
     private void DrawPageHeading(string eyebrow, string title, string subtitle)

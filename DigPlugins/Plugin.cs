@@ -78,8 +78,24 @@ public sealed class Plugin : IDalamudPlugin
     private const uint DigGeneralActionId = 20;
     private const uint OptimizedInteractionMapId = 12;
     private const uint RouletteExitBaseId = 2000139;
-    private const uint DoorSelectionGreedTrapLargeBaseId = 2013872;
-    private const uint DoorSelectionGreedTrapSmallBaseId = 2013873;
+    // Gambler's Lure field objects.  These are the same rows used by
+    // AutoTreasureMaps: each lure room has one even (large) and one odd
+    // (small) event object, and the card is a nameless event object nearby.
+    private const uint DoorSelectionGreedTrapFirstChoiceBaseId = 2013872;
+    private const uint DoorSelectionGreedTrapLastChoiceBaseId = 2013881;
+    private const uint DoorSelectionGreedTrapCardBaseId = 2007457;
+    private const int DoorSelectionGreedTrapCardFaceOffset = 0x1B2;
+    private const int DoorSelectionGreedTrapCardFaceShift = 3;
+    private const float DoorSelectionGreedTrapCardSideMeters = 1.5f;
+    private const float DoorSelectionGreedTrapCardMeters = 3.5f;
+    private const int DoorSelectionGreedTrapGameChallenges = 5;
+    private const int DoorSelectionGreedTrapMiddleCard = 5;
+    private const int DoorSelectionGreedTrapClickAttempts = 3;
+    private static readonly TimeSpan DoorSelectionGreedTrapCloseWait = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan DoorSelectionGreedTrapQuietLimit = TimeSpan.FromMinutes(6);
+    private static readonly TimeSpan DoorSelectionGreedTrapGuessWait = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan DoorSelectionGreedTrapAnswerWait = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan DoorSelectionGreedTrapCardReadWait = TimeSpan.FromSeconds(3);
     private const float RouletteInteractionDistance = 2f;
     // Door collision geometry can prevent vnavmesh from reaching the object
     // center. 3.5 yalms is close enough for the game interaction range while
@@ -349,12 +365,41 @@ public sealed class Plugin : IDalamudPlugin
     private bool doorSelectionGreedTrapPageDetected;
     private string doorSelectionGreedTrapAddonName = string.Empty;
     private DateTime doorSelectionGreedTrapLastSeenAt;
-    private DateTime doorSelectionGreedTrapNoticeSeenAt;
     private DateTime doorSelectionGreedTrapNextFullScanAt;
+    // Once the lure is seen, all other door-selection work is suspended until
+    // the lure has finished.  This prevents chest, combat and door navigation
+    // from racing the challenge/card/guess handoff.
+    private bool doorSelectionGreedTrapActive;
+    private bool doorSelectionGreedTrapNavigationStopped;
+    private bool doorSelectionGreedTrapAwaitingChoiceClear;
+    private DateTime doorSelectionGreedTrapChoiceClearDeadline;
+    private DateTime doorSelectionGreedTrapConfirmationDeadline;
+    private DateTime doorSelectionGreedTrapCardDealtAt;
+    private int doorSelectionGreedTrapChallengeAttempts;
+    private int doorSelectionGreedTrapOpenCofferAttempts;
+    private DateTime doorSelectionGreedTrapLastLureEventAt;
+    private bool doorSelectionGreedTrapLureUnattended;
+    private bool doorSelectionGreedTrapLastResultWasTie;
+    private bool doorSelectionGreedTrapOpenCofferPending;
+    private DateTime doorSelectionGreedTrapRoundStartedAt;
+    private bool doorSelectionGreedTrapOutcomePending;
+    private DateTime doorSelectionGreedTrapOutcomeDeadline;
+    private DateTime doorSelectionGreedTrapInteractionIssuedAt;
+    private bool doorSelectionGreedTrapPromptWasVisibleBeforeInteraction;
+    private DateTime doorSelectionGreedTrapPromptHiddenAt;
+    private DateTime doorSelectionGreedTrapLastTieAt;
+    private DateTime doorSelectionGreedTrapLastRoundLogAt;
+    private int doorSelectionGreedTrapLastLoggedRound;
+    private DateTime doorSelectionGreedTrapLastDisarmAt;
+    private DateTime doorSelectionGreedTrapLastTerminalLogAt;
+    private uint doorSelectionGreedTrapLastTerminalLogId;
+    private uint doorSelectionGreedTrapLastLureEventId;
+    private int doorSelectionGreedTrapLastHintedCardValue;
+    private DateTime doorSelectionGreedTrapLastHintAt;
+    private bool doorSelectionGreedTrapGuessWasPending;
     private bool greedCardLifecycleMonitoring;
     private uint greedCardRefreshEventCount;
     private readonly List<string> greedCardRefreshHistory = [];
-    private string greedCardImageSignatureBeforeChallenge = string.Empty;
     private DateTime doorSelectionDoorAnimationUntil;
     private bool confirmDoorSelectionDoorPending;
     private DateTime doorSelectionDoorConfirmDeadline;
@@ -369,6 +414,8 @@ public sealed class Plugin : IDalamudPlugin
     private System.Numerics.Vector3 doorSelectionVfxStableAnchor;
     private float doorSelectionVfxAccumulatedMovement;
     private DateTime doorSelectionVfxStableSince;
+    private DateTime lootRollNextAt;
+    private int lootRollAttempts;
     private ulong doorSelectionExitEntityId;
     private bool doorSelectionExitMoveIssued;
     private bool doorSelectionExitPositionSampleValid;
@@ -553,10 +600,21 @@ public sealed class Plugin : IDalamudPlugin
         this.targetManager = targetManager;
         this.marketBoard = marketBoard;
         this.log = log;
+        LootRolls.Initialize(sigScanner, log);
         configuration = pluginInterface.GetPluginConfig() as PluginConfiguration ?? new PluginConfiguration();
         if (!Enum.IsDefined(configuration.LogicMode))
         {
             configuration.LogicMode = TreasureHuntLogicMode.Head;
+        }
+
+        if (!Enum.IsDefined(configuration.DoorSelectionGreedTrapPolicy))
+        {
+            configuration.DoorSelectionGreedTrapPolicy = DoorSelectionGreedTrapPolicy.AskMe;
+        }
+
+        if (!Enum.IsDefined(configuration.LootRoll))
+        {
+            configuration.LootRoll = LootRoll.Need;
         }
 
         animationLockController = new AnimationLockController(
@@ -612,6 +670,7 @@ public sealed class Plugin : IDalamudPlugin
         mainWindow = new MainWindow(this, this.pluginInterface, dataManager, textureProvider, framework, gameConfig);
         this.gameInventory.InventoryChanged += OnInventoryChanged;
         this.chatGui.ChatMessage += OnChatMessage;
+        this.chatGui.LogMessage += OnLogMessage;
         this.clientState.ZoneInit += OnZoneInit;
         this.clientState.MapIdChanged += OnMapIdChanged;
         this.framework.Update += OnFrameworkUpdate;
@@ -984,6 +1043,11 @@ public sealed class Plugin : IDalamudPlugin
 
     private bool IsRouletteMap => TreasureMapDefinitions.RouletteInstanceMapIds.Contains(clientState.MapId);
 
+    private bool IsTreasureDungeonGreedTrapContext
+        => doorSelectionModeActive ||
+           (activeTreasureMapRoute == TreasureMapRoute.DoorSelection &&
+            TreasureMapDefinitions.DoorSelectionInstanceMapIds.Contains(clientState.MapId));
+
     public bool IsRouletteMode => IsRouletteMap && activeTreasureMapRoute == TreasureMapRoute.Roulette;
 
     public string CurrentLogicName => !IsAutoTreasureHuntEnabled
@@ -1052,6 +1116,32 @@ public sealed class Plugin : IDalamudPlugin
         pluginInterface.SavePluginConfig(configuration);
     }
 
+    /// <summary>
+    /// How the Gambler's Lure (the high/low greed trap) is handled when it
+    /// appears during a treasure dungeon.
+    /// </summary>
+    public DoorSelectionGreedTrapPolicy DoorSelectionGreedTrapPolicy
+        => Enum.IsDefined(configuration.DoorSelectionGreedTrapPolicy)
+            ? configuration.DoorSelectionGreedTrapPolicy
+            : DoorSelectionGreedTrapPolicy.AskMe;
+
+    public void SetDoorSelectionGreedTrapPolicy(DoorSelectionGreedTrapPolicy policy)
+    {
+        configuration.DoorSelectionGreedTrapPolicy = Enum.IsDefined(policy)
+            ? policy
+            : DoorSelectionGreedTrapPolicy.AskMe;
+        pluginInterface.SavePluginConfig(configuration);
+    }
+
+    public LootRoll LootRollPolicy
+        => Enum.IsDefined(configuration.LootRoll) ? configuration.LootRoll : LootRoll.Need;
+
+    public void SetLootRollPolicy(LootRoll policy)
+    {
+        configuration.LootRoll = Enum.IsDefined(policy) ? policy : LootRoll.Need;
+        pluginInterface.SavePluginConfig(configuration);
+    }
+
     private DoorSelectionChoice GetActiveDoorSelectionChoice(int floor)
     {
         if (doorSelectionRuntimeChoiceFloor == floor && doorSelectionRuntimeChoice.HasValue)
@@ -1093,6 +1183,7 @@ public sealed class Plugin : IDalamudPlugin
         clientState.ZoneInit -= OnZoneInit;
         gameInventory.InventoryChanged -= OnInventoryChanged;
         chatGui.ChatMessage -= OnChatMessage;
+        chatGui.LogMessage -= OnLogMessage;
         openMarketAnywhere.Dispose();
         animationLockController.Dispose();
         doorSelectionAnimationSkipController.Dispose();
@@ -2066,12 +2157,17 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (!TryFindDoorSelectionGreedTrapAddon(
-                out _,
-                out var addonName,
-                out var addonText,
-                out var pageHasGreedTrapSignal) ||
-            !pageHasGreedTrapSignal)
+        var addon = gameGui.GetAddonByName<AtkUnitBase>("TreasureHighLow");
+        if (addon != null && addon->IsReady && addon->IsVisible)
+        {
+            DoorSelectionGreedTrapPageDetectionTestStatus =
+                $"已检测到强欲窗口：TreasureHighLow；挑战按钮状态：{DescribeDoorSelectionGreedChallengeButton(addon)}；" +
+                $"大/小可选中：{DoorSelectionGreedTrapGuessPending()}";
+            PrintEcho(DoorSelectionGreedTrapPageDetectionTestStatus);
+            return;
+        }
+
+        if (!DoorSelectionGreedTrapGuessPending())
         {
             if (TryFindDoorSelectionGreedTrapNotice(out var noticeAddonName, out _))
             {
@@ -2090,12 +2186,9 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        var normalizedText = NormalizeDoorSelectionGreedTrapText(addonText);
-        var preview = normalizedText.Length > 120
-            ? normalizedText[..120] + "..."
-            : normalizedText;
+        var preview = "TreasureHighLow 已关闭；场景大/小物体当前可选中。";
         DoorSelectionGreedTrapPageDetectionTestStatus =
-            $"已检测到强欲页面：Addon {addonName}；文本特征：{preview}";
+            $"已检测到强欲卡牌选择阶段；{preview}";
         PrintEcho(DoorSelectionGreedTrapPageDetectionTestStatus);
     }
 
@@ -2120,32 +2213,38 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (!TryFindDoorSelectionGreedTrapAddon(
-                out var addon,
-                out var addonName,
-                out var addonText,
-                out var pageHasGreedTrapSignal) || !pageHasGreedTrapSignal)
+        var addon = gameGui.GetAddonByName<AtkUnitBase>("TreasureHighLow");
+        if (addon == null || !addon->IsReady || !addon->IsVisible)
         {
             DoorSelectionGreedTrapChallengeClickTestStatus =
-                $"未找到强欲挑战控件；活动 UI：{DescribeDoorSelectionActiveAddons()}";
+                $"未找到可用的 TreasureHighLow 挑战窗口；活动 UI：{DescribeDoorSelectionActiveAddons()}";
             PrintEcho(DoorSelectionGreedTrapChallengeClickTestStatus);
             return;
         }
 
-        var normalizedText = NormalizeDoorSelectionGreedTrapText(addonText);
-        if (!IsStrongDoorSelectionGreedTrapPrompt(addonText))
+        var tryLuckButton = addon->GetComponentButtonById(46);
+        if (tryLuckButton == null ||
+            !tryLuckButton->IsEnabled ||
+            !tryLuckButton->AtkResNode->IsVisible())
         {
             DoorSelectionGreedTrapChallengeClickTestStatus =
-                $"找到强欲 UI（{addonName}），但当前没有挑战解除陷阱选项；文本：{normalizedText}";
+                $"已找到 TreasureHighLow，但挑战按钮当前不可用（{DescribeDoorSelectionGreedChallengeButton(addon)}）。";
             PrintEcho(DoorSelectionGreedTrapChallengeClickTestStatus);
             return;
         }
 
-        greedCardImageSignatureBeforeChallenge = DescribeDoorSelectionImageNodeDetails(addon);
-        var clicked = TryFireDoorSelectionChallengeButton(addon, out _);
-        DoorSelectionGreedTrapChallengeClickTestStatus = clicked
-            ? $"已向 {addonName} 分发挑战解除陷阱点击事件；请观察游戏是否切换到卡牌页。"
-            : $"找到 {addonName} 的挑战文案，但未找到可分发的按钮事件/SelectString 条目；文本：{normalizedText}";
+        var buttonNode = tryLuckButton->AtkComponentBase.OwnerNode;
+        var buttonEvent = buttonNode->AtkResNode.AtkEventManager.Event;
+        if (buttonEvent == null)
+        {
+            DoorSelectionGreedTrapChallengeClickTestStatus = "已找到挑战按钮，但未取得按钮事件。";
+            PrintEcho(DoorSelectionGreedTrapChallengeClickTestStatus);
+            return;
+        }
+
+        addon->ReceiveEvent(buttonEvent->State.EventType, (int)buttonEvent->Param, buttonEvent);
+        DoorSelectionGreedTrapChallengeClickTestStatus =
+            "已按源项目方式点击 TreasureHighLow 的挑战按钮；请观察大/小物体是否出现。";
         PrintEcho(DoorSelectionGreedTrapChallengeClickTestStatus);
     }
 
@@ -2159,70 +2258,38 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (!TryFindDoorSelectionGreedTrapAddon(
-                out var addon,
-                out var addonName,
-                out var addonText,
-                out var pageHasGreedTrapSignal) ||
-            !pageHasGreedTrapSignal)
+        var addon = gameGui.GetAddonByName<AtkUnitBase>("TreasureHighLow");
+        var cardObjectsVisible = DoorSelectionGreedTrapGuessPending();
+        if ((addon == null || !addon->IsReady || !addon->IsVisible) && !cardObjectsVisible)
         {
             DoorSelectionGreedTrapCardValueTestStatus = "未检测到强欲页面，无法读取卡牌点数。";
             PrintEcho(DoorSelectionGreedTrapCardValueTestStatus);
             return;
         }
 
-        var isHighLowAddon = string.Equals(addonName, "TreasureHighLow", StringComparison.OrdinalIgnoreCase);
-        var isCardPage = isHighLowAddon || IsStrongDoorSelectionCardPage(addonText) ||
-                         doorSelectionGreedTrapChallengeAccepted &&
-                         string.Equals(addonName, doorSelectionGreedTrapAddonName, StringComparison.OrdinalIgnoreCase) &&
-                         !IsStrongDoorSelectionGreedTrapPrompt(addonText);
-        if (!isCardPage)
-        {
-            DoorSelectionGreedTrapCardValueTestStatus =
-                $"已检测到强欲挑战页（Addon {addonName}，卡牌页特征未出现）；卡牌数组[{(int)NumberArrayType.TreasureHighLow}]=" +
-                DescribeDoorSelectionHighLowNumberArray() + "; " + DescribeDoorSelectionCardCandidates(addon) + "; " +
-                DescribeDoorSelectionCandidateNumberArrays() + "; " + DescribeDoorSelectionImageNodes(addon);
-            PrintEcho(DoorSelectionGreedTrapCardValueTestStatus);
-            return;
-        }
+        var addonName = "TreasureHighLow";
 
-        var currentImageSignature = DescribeDoorSelectionImageNodeDetails(addon);
-        if (string.IsNullOrEmpty(greedCardImageSignatureBeforeChallenge) ||
-            string.Equals(currentImageSignature, greedCardImageSignatureBeforeChallenge, StringComparison.Ordinal))
-        {
-            DoorSelectionGreedTrapCardValueTestStatus =
-                "TreasureHighLow 已出现，但图片节点仍与挑战前一致；当前视为牌背/尚未翻牌，不报告点数。" +
-                "请先触发“挑战解除陷阱”，翻牌后再读取。";
-            DoorSelectionGreedTrapCardValueTestStatus += " " + currentImageSignature;
-            PrintEcho(DoorSelectionGreedTrapCardValueTestStatus);
-            return;
-        }
-
-        var value = TryReadDoorSelectionLeftCardValue(addon);
-        if (value is < 1 or > 9 &&
-            doorSelectionGreedTrapCardValueRefreshedAt != default &&
-            DateTime.UtcNow - doorSelectionGreedTrapCardValueRefreshedAt <= TimeSpan.FromSeconds(5))
-        {
-            value = doorSelectionGreedTrapRefreshedCardValue;
-        }
+        var value = TryReadDoorSelectionGreedTrapCardFace(left: true, out var cardMask);
         if (value is < 1 or > 9)
         {
             DoorSelectionGreedTrapCardValueTestStatus =
-                $"已检测到强欲页面（Addon {addonName}），但暂未读取到左侧卡牌点数。";
-            DoorSelectionGreedTrapCardValueTestStatus += $" 专用数组[{(int)NumberArrayType.TreasureHighLow}]={DescribeDoorSelectionHighLowNumberArray()}；" +
+                $"已检测到强欲页面（Addon {addonName}），但暂未读取到左侧卡牌点数；当前掩码 0x{cardMask:X}。";
+            DoorSelectionGreedTrapCardValueTestStatus += $" 场景卡牌掩码读取失败；专用数组[{(int)NumberArrayType.TreasureHighLow}]={DescribeDoorSelectionHighLowNumberArray()}；" +
                                                          DescribeDoorSelectionCardCandidates(addon) + "；" +
                                                          DescribeDoorSelectionCandidateNumberArrays() + "；" +
-                                                         DescribeDoorSelectionImageNodes(addon);
+                                                         DescribeDoorSelectionImageNodes(addon) + "；" +
+                                                         DescribeDoorSelectionCardImageCandidates(addon);
             PrintEcho(DoorSelectionGreedTrapCardValueTestStatus);
             return;
         }
 
-        var choice = GetDoorSelectionGreedTrapChoice(value);
+        var choice = GetDoorSelectionGreedTrapChoice(value.GetValueOrDefault());
         DoorSelectionGreedTrapCardValueTestStatus =
-            $"强欲左侧卡牌点数：{value}；自动判断：{GetDoorSelectionGreedTrapChoiceName(choice)}。";
-        DoorSelectionGreedTrapCardValueTestStatus += $" 专用数组[{(int)NumberArrayType.TreasureHighLow}]={DescribeDoorSelectionHighLowNumberArray()}；" +
+            $"强欲左侧卡牌点数：{value}（掩码 0x{cardMask:X}）；自动判断：{GetDoorSelectionGreedTrapChoiceName(choice)}。";
+        DoorSelectionGreedTrapCardValueTestStatus += $" 场景卡牌掩码来源；专用数组[{(int)NumberArrayType.TreasureHighLow}]={DescribeDoorSelectionHighLowNumberArray()}；" +
                                                      DescribeDoorSelectionCardCandidates(addon) + "；" +
-                                                     DescribeDoorSelectionImageNodes(addon);
+                                                     DescribeDoorSelectionImageNodes(addon) + "；" +
+                                                     DescribeDoorSelectionCardImageCandidates(addon);
         PrintEcho(DoorSelectionGreedTrapCardValueTestStatus);
     }
 
@@ -2297,7 +2364,8 @@ public sealed class Plugin : IDalamudPlugin
                        $"Ints=[{string.Join(",", refreshIntegers.Select((value, index) => $"{index}:{value}"))}]; " +
                        DescribeGreedLifecycleAtkValues(refresh.AtkValueEnumerable) +
                        $"; HighLow={DescribeDoorSelectionHighLowNumberArray()}; " +
-                       DescribeDoorSelectionImageNodeDetails(addon);
+                       DescribeDoorSelectionImageNodeDetails(addon) + "; " +
+                       DescribeDoorSelectionCardImageCandidates(addon);
         greedCardRefreshHistory.Add(snapshot);
         if (greedCardRefreshHistory.Count > 10)
         {
@@ -4456,6 +4524,19 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        // The door-selection lure is modal while its selected dungeon route is
+        // active; the wheel route keeps its own dungeon workflow untouched.
+        if (TryHandleDoorSelectionGreedTrap())
+        {
+            return;
+        }
+
+        // The Gambler's Lure is modal and must be resolved before pending loot
+        // is settled, just like the source dungeon state machine.  This also
+        // prevents an older coffer's Need/Greed entry from competing with the
+        // lure's card and confirmation windows.
+        TryHandleLootRolls();
+
         if (IsWheelLogicSelected)
         {
             TryHandleWheelOutdoorNavigation();
@@ -4577,6 +4658,81 @@ public sealed class Plugin : IDalamudPlugin
         TryHandleTreasurePortal();
     }
 
+    private void TryHandleLootRolls()
+    {
+        // LootRolls is a native request and does not require the NeedGreed
+        // window to be open.  Keep it scoped to an active treasure run so
+        // merely loading the plugin (or leaving the setting enabled while
+        // playing another duty) never auto-votes unrelated loot.
+        if (!IsAutoTreasureHuntEnabled || emergencyStopActive || !IsTreasureLootRollContext())
+            return;
+
+        if (LootRollPolicy == LootRoll.Manual || DateTime.UtcNow < lootRollNextAt)
+            return;
+
+        var pending = LootRolls.Pending(IsTreasureLootChest);
+        if (pending <= 0)
+        {
+            lootRollAttempts = 0;
+            return;
+        }
+
+        if (!LootRolls.Available)
+        {
+            lootRollNextAt = DateTime.UtcNow.AddSeconds(10);
+            return;
+        }
+
+        if (lootRollAttempts >= 20)
+        {
+            lootRollNextAt = DateTime.UtcNow.AddSeconds(15);
+            return;
+        }
+
+        var sent = LootRolls.Roll(LootRollPolicy, IsTreasureLootChest);
+        lootRollAttempts++;
+        lootRollNextAt = DateTime.UtcNow.AddSeconds(sent > 0 ? 3 : 10);
+        if (sent > 0)
+        {
+            AutoTreasureHuntStatus = $"战利品：已按 {LootRollPolicy} 投票 {sent} 项，等待结果。";
+        }
+    }
+
+    /// <summary>
+    /// Returns whether one of the treasure workflows currently owns loot
+    /// settlement.  Dungeon loot is intentionally accepted by chest id while
+    /// inside the dungeon; outdoor loot is restricted to the chest currently
+    /// tracked by the head workflow.
+    /// </summary>
+    private bool IsTreasureLootRollContext()
+    {
+        if (!IsAutoTreasureHuntEnabled || emergencyStopActive)
+            return false;
+
+        // Door-selection and roulette instances can produce several coffers;
+        // their loot is settled before the workflow leaves the instance.
+        if (doorSelectionModeActive || rouletteModeActive || IsRouletteMode ||
+            (IsWheelLogicSelected && IsRouletteMap))
+            return true;
+
+        // Outside a dungeon only settle loot belonging to a chest that this
+        // workflow has actually opened or is waiting to open.
+        return treasureChestEntityId != 0 &&
+               (treasureChestPending || confirmTreasureChestPending ||
+                waitForTreasureCombatStart || treasureCombatActive ||
+                treasurePortalPending || confirmTreasurePortalPending);
+    }
+
+    private bool IsTreasureLootChest(uint chestObjectId)
+    {
+        if (doorSelectionModeActive || rouletteModeActive || IsRouletteMode ||
+            (IsWheelLogicSelected && IsRouletteMap))
+            return true;
+
+        return chestObjectId != 0 && treasureChestEntityId != 0 &&
+               (ulong)chestObjectId == treasureChestEntityId;
+    }
+
     private void TryHandleManualTestUpdate()
     {
         // 手动测试同样优先推进车轮传送状态，避免通用 watchdog 抢先返回。
@@ -4656,8 +4812,112 @@ public sealed class Plugin : IDalamudPlugin
         wheelWasInCombat = inCombat;
     }
 
+    private void OnLogMessage(ILogMessage message)
+    {
+        // LogMessage is a global stream.  Only consume lure rows while the
+        // selected door-selection duty is active (or while its map is already
+        // loaded); otherwise a stale row from another duty could arm the
+        // dungeon modal state machine.
+        if (!IsTreasureDungeonGreedTrapContext)
+        {
+            return;
+        }
+
+        // These rows are emitted by the Gambler's Lure independently of the
+        // localized chat text.  Use them for round/tie accounting so a
+        // localized client, or a tie that has no visible chat line, cannot
+        // consume a challenge accidentally.
+        var now = DateTime.UtcNow;
+        if (DoorSelectionGreedTrapLog.IsKnown(message.LogMessageId))
+            doorSelectionGreedTrapLastLureEventId = message.LogMessageId;
+        switch (message.LogMessageId)
+        {
+            case GreedTrapLogMessages.LureTied:
+                doorSelectionGreedTrapActive = true;
+                doorSelectionGreedTrapLastResultWasTie = true;
+                doorSelectionGreedTrapLastTieAt = now;
+                doorSelectionGreedTrapLastLureEventAt = now;
+                doorSelectionGreedTrapLastSeenAt = now;
+                break;
+
+            case GreedTrapLogMessages.LureRound:
+                doorSelectionGreedTrapActive = true;
+                doorSelectionGreedTrapLastLureEventAt = now;
+                doorSelectionGreedTrapLastSeenAt = now;
+                doorSelectionGreedTrapLastRoundLogAt = now;
+                if (message.TryGetIntParameter(0, out var taken))
+                {
+                    doorSelectionGreedTrapLastLoggedRound = Math.Clamp(taken, 0, DoorSelectionGreedTrapGameChallenges);
+                }
+                break;
+
+            case GreedTrapLogMessages.LureSprung:
+                BeginDoorSelectionGreedTrapLure(now, message.LogMessageId);
+                break;
+
+            case GreedTrapLogMessages.LureDisarmed:
+                doorSelectionGreedTrapActive = true;
+                doorSelectionGreedTrapLastDisarmAt = now;
+                doorSelectionGreedTrapLastLureEventAt = now;
+                doorSelectionGreedTrapLastSeenAt = now;
+                break;
+
+            case GreedTrapLogMessages.LureAllDisarmed:
+                doorSelectionGreedTrapActive = true;
+                doorSelectionGreedTrapLastDisarmAt = now;
+                doorSelectionGreedTrapLastTerminalLogAt = now;
+                doorSelectionGreedTrapLastTerminalLogId = message.LogMessageId;
+                doorSelectionGreedTrapLastLureEventAt = now;
+                doorSelectionGreedTrapLastSeenAt = now;
+                break;
+
+            case GreedTrapLogMessages.LureDeclined:
+            case GreedTrapLogMessages.LureStopped:
+            case GreedTrapLogMessages.LureFailed:
+            case GreedTrapLogMessages.LureTemptedAnother:
+                doorSelectionGreedTrapActive = true;
+                doorSelectionGreedTrapLastTerminalLogAt = now;
+                doorSelectionGreedTrapLastTerminalLogId = message.LogMessageId;
+                doorSelectionGreedTrapLastLureEventAt = now;
+                doorSelectionGreedTrapLastSeenAt = now;
+                break;
+        }
+    }
+
     private void OnChatMessage(IChatMessage message)
     {
+        if (doorSelectionModeActive)
+        {
+            var lureMessage = NormalizeDoorSelectionGreedTrapText(message.Message.TextValue);
+            if (lureMessage.Contains("平局", StringComparison.Ordinal) ||
+                lureMessage.Contains("tie", StringComparison.Ordinal) ||
+                lureMessage.Contains("tied", StringComparison.Ordinal))
+            {
+                doorSelectionGreedTrapLastResultWasTie = true;
+                doorSelectionGreedTrapLastTieAt = DateTime.UtcNow;
+                doorSelectionGreedTrapLastLureEventId = GreedTrapLogMessages.LureTied;
+                doorSelectionGreedTrapLastLureEventAt = doorSelectionGreedTrapLastTieAt;
+                doorSelectionGreedTrapLastSeenAt = doorSelectionGreedTrapLastLureEventAt;
+            }
+        }
+
+        if (doorSelectionModeActive &&
+            TryRecordDoorSelectionGreedTrapEvent(message.Message.TextValue))
+        {
+            var now = DateTime.UtcNow;
+            if (!doorSelectionGreedTrapActive ||
+                IsDoorSelectionGreedTrapLureStartText(message.Message.TextValue))
+            {
+                BeginDoorSelectionGreedTrapLure(now, GreedTrapLogMessages.LureSprung);
+            }
+            else
+            {
+                doorSelectionGreedTrapActive = true;
+                doorSelectionGreedTrapLastLureEventAt = now;
+                doorSelectionGreedTrapLastSeenAt = now;
+            }
+        }
+
         if (TryRecordDoorSelectionGlowingDoorMessage(message.Message.TextValue, out var glowingChoice) &&
             doorSelectionModeActive &&
             !emergencyStopActive)
@@ -6003,6 +6263,12 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        // Roulette duties can also surface the Gambler's Lure UI.  Clear any
+        // state left by a previous door-selection run before accepting a new
+        // roulette interaction; otherwise stale round/log timestamps can be
+        // mistaken for the first round of this run.
+        ResetDoorSelectionGreedTrapState();
+
         commandManager.ProcessCommand("/vnav stop");
         EnableAeAssistForTreasureInstance();
         UnloadOptimizedInteraction();
@@ -7290,7 +7556,7 @@ public sealed class Plugin : IDalamudPlugin
             return true;
         }
 
-        if (!string.Equals(gameObject.ObjectKind.ToString(), "EventObj", StringComparison.OrdinalIgnoreCase))
+        if (gameObject.ObjectKind != Dalamud.Game.ClientState.Objects.Enums.ObjectKind.EventObj)
         {
             return false;
         }
@@ -7301,76 +7567,238 @@ public sealed class Plugin : IDalamudPlugin
                name.Contains("exit", StringComparison.OrdinalIgnoreCase);
     }
 
+    private TimeSpan DoorSelectionGreedTrapQuietWait()
+        => doorSelectionGreedTrapLastLureEventId is
+            GreedTrapLogMessages.LureTied or
+            GreedTrapLogMessages.LureRound or
+            GreedTrapLogMessages.LureSprung or
+            GreedTrapLogMessages.LureDisarmed
+            ? DoorSelectionGreedTrapQuietLimit
+            : DoorSelectionGreedTrapCloseWait;
+
     private unsafe bool TryHandleDoorSelectionGreedTrap()
     {
+        // This handler is called before the route-specific state machines on
+        // every framework tick.  Keep the native TreasureHighLow hooks scoped
+        // to a known treasure instance so an unrelated high/low window cannot
+        // pause or drive the outdoor workflow.
+        if (!IsTreasureDungeonGreedTrapContext)
+        {
+            return false;
+        }
+
         var now = DateTime.UtcNow;
+        var lureAddon = gameGui.GetAddonByName<AtkUnitBase>("TreasureHighLow");
+        var lureOpen = lureAddon != null && lureAddon->IsReady && lureAddon->IsVisible;
+        var guessPending = DoorSelectionGreedTrapGuessPending();
+        var policy = DoorSelectionGreedTrapPolicy;
+        TrackDoorSelectionGreedTrapGuessCompletion(guessPending);
+
+        if ((lureOpen || guessPending) && !doorSelectionGreedTrapNavigationStopped)
+        {
+            // A lure can appear while the previous chest/door movement command
+            // is still active.  Stop it once so the character stays beside the
+            // coffer until the lure has been answered.
+            commandManager.ProcessCommand("/vnav stop");
+            doorSelectionGreedTrapNavigationStopped = true;
+        }
+
+        // AskMe deliberately leaves both the lure window and the high/low
+        // objects to the player, while still making the dungeon state machine
+        // modal so it cannot walk away from the coffer.
+        if (policy == DoorSelectionGreedTrapPolicy.AskMe)
+        {
+            if (lureOpen || guessPending)
+            {
+                doorSelectionGreedTrapActive = true;
+                doorSelectionGreedTrapLastSeenAt = now;
+                if (guessPending)
+                {
+                    PublishDoorSelectionGreedTrapCardHint(now);
+                }
+                AutoTreasureHuntStatus = guessPending
+                    ? "选门：强欲卡牌等待玩家选择大/小。"
+                    : "选门：强欲窗口等待玩家决定挑战或直接开箱。";
+                return true;
+            }
+
+            if (!doorSelectionGreedTrapActive)
+                return false;
+
+            // Once the lure window and card objects are gone, only keep the
+            // state machine modal for the short UI close transition.  Holding
+            // this guard for the full quiet limit would block the dungeon
+            // flow for minutes after a player manually opened the coffer.
+            if (now - doorSelectionGreedTrapLastSeenAt < DoorSelectionGreedTrapQuietWait())
+            {
+                return true;
+            }
+
+            ResetDoorSelectionGreedTrapState();
+            return false;
+        }
 
         if (doorSelectionGreedTrapFinished)
-            return false;
+        {
+            return guessPending || lureOpen;
+        }
 
+        // A successful object interaction is resolved by a LogMessage.  Do
+        // not count the round in the same tick as the Yes callback: a tie is
+        // reported asynchronously and must deal the same challenge again.
+        if (doorSelectionGreedTrapOutcomePending)
+        {
+            if (doorSelectionGreedTrapLastResultWasTie &&
+                doorSelectionGreedTrapLastTieAt >= doorSelectionGreedTrapInteractionIssuedAt)
+            {
+                doorSelectionGreedTrapOutcomePending = false;
+                doorSelectionGreedTrapLastResultWasTie = false;
+                doorSelectionGreedTrapAwaitingChoiceClear = false;
+                doorSelectionGreedTrapChoiceClearDeadline = default;
+                doorSelectionGreedTrapChallengeAccepted = false;
+                doorSelectionGreedTrapChallengeAttempts = 0;
+                doorSelectionGreedTrapCardDealtAt = now;
+                doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(300);
+                ResetDoorSelectionGreedTrapObjectTarget();
+                AutoTreasureHuntStatus = "选门：本轮强欲平局，重新发牌且不消耗轮次。";
+                return true;
+            }
+
+            // LureRound carries the completed share count.  LureDisarmed is
+            // the successful per-round fallback when a client omits that row;
+            // terminal rows (all disarmed, stopped, failed, declined or
+            // another lure) must never be mistaken for a successful round.
+            var roundLogged =
+                doorSelectionGreedTrapLastRoundLogAt >= doorSelectionGreedTrapInteractionIssuedAt;
+            var disarmLogged =
+                doorSelectionGreedTrapLastDisarmAt >= doorSelectionGreedTrapInteractionIssuedAt;
+            var terminalLogged =
+                doorSelectionGreedTrapLastTerminalLogAt >= doorSelectionGreedTrapInteractionIssuedAt;
+            if ((roundLogged || disarmLogged) && !terminalLogged)
+            {
+                CommitDoorSelectionGreedTrapRound();
+                return true;
+            }
+
+            if (terminalLogged && now < doorSelectionGreedTrapOutcomeDeadline)
+            {
+                AutoTreasureHuntStatus =
+                    $"选门：强欲终止事件 {doorSelectionGreedTrapLastTerminalLogId} 已到达，等待确认是否有新轮次。";
+                return true;
+            }
+
+            if (now < doorSelectionGreedTrapOutcomeDeadline)
+            {
+                AutoTreasureHuntStatus = "选门：已确认大/小，等待强欲结果。";
+                return true;
+            }
+
+            // A prompt that was accepted but produced no game result is safer
+            // left to the player than counted as a completed challenge.
+            doorSelectionGreedTrapOutcomePending = false;
+            doorSelectionGreedTrapConfirmationPending = false;
+            AutoTreasureHuntStatus = "选门：强欲结果未确认，已暂停自动轮次计数。";
+            return true;
+        }
+
+        // The source project waits until the field choices disappear after a
+        // guess.  Without this gate the next framework tick can select the
+        // previous round's still-targetable object again.
+        if (doorSelectionGreedTrapAwaitingChoiceClear)
+        {
+            if (!guessPending || now >= doorSelectionGreedTrapChoiceClearDeadline)
+            {
+                doorSelectionGreedTrapAwaitingChoiceClear = false;
+                doorSelectionGreedTrapChoiceClearDeadline = default;
+                doorSelectionGreedTrapCardDealtAt = default;
+                doorSelectionGreedTrapChallengeAccepted = false;
+                doorSelectionGreedTrapChallengeAttempts = 0;
+                doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(300);
+                AutoTreasureHuntStatus =
+                    $"选门：第 {doorSelectionGreedTrapRoundsCompleted}/5 次场景已清理，等待下一次强欲窗口。";
+                if (doorSelectionGreedTrapRoundsCompleted >= DoorSelectionGreedTrapGameChallenges)
+                {
+                    doorSelectionGreedTrapFinished = true;
+                    AutoTreasureHuntStatus = "选门：强欲五次挑战均已完成，等待场景清理。";
+                    return guessPending;
+                }
+            }
+            else
+            {
+                AutoTreasureHuntStatus = "选门：已确认本轮猜牌，等待大/小物体从场景中消失。";
+                return true;
+            }
+        }
+
+        // Confirm the interaction before counting a round.  This mirrors the
+        // source's GuessLure/ConfirmPrompt sequence and prevents a stale
+        // SelectYesno from advancing the state machine.
         if (doorSelectionGreedTrapConfirmationPending)
         {
             var confirmation = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
             if (confirmation == null || !confirmation->IsReady || !confirmation->IsVisible)
             {
-                AutoTreasureHuntStatus =
-                    $"选门：第 {doorSelectionGreedTrapRoundsCompleted + 1}/5 次大/小交互已完成，等待确认窗口。";
+                if (doorSelectionGreedTrapPromptWasVisibleBeforeInteraction)
+                    doorSelectionGreedTrapPromptHiddenAt = now;
+
+                if (now < doorSelectionGreedTrapConfirmationDeadline)
+                {
+                    AutoTreasureHuntStatus =
+                        $"选门：第 {doorSelectionGreedTrapRoundsCompleted + 1}/5 次大/小交互已完成，等待确认窗口。";
+                    return true;
+                }
+
+                doorSelectionGreedTrapConfirmationPending = false;
+                AutoTreasureHuntStatus = "选门：强欲确认窗口未出现，交由玩家处理。";
+                return true;
+            }
+
+            // A SelectYesno that was already visible before the lure object
+            // interaction belongs to another action (for example a party
+            // invitation). Wait for it to disappear and reappear instead of
+            // blindly answering it.
+            if (doorSelectionGreedTrapPromptWasVisibleBeforeInteraction &&
+                doorSelectionGreedTrapPromptHiddenAt == default)
+            {
+                AutoTreasureHuntStatus = "选门：检测到交互前已有确认窗口，等待其关闭。";
+                return true;
+            }
+
+            var promptText = ReadAddonText((AtkUnitBase*)confirmation);
+            if (!IsDoorSelectionGreedTrapConfirmationPrompt(promptText))
+            {
+                if (now < doorSelectionGreedTrapConfirmationDeadline)
+                {
+                    AutoTreasureHuntStatus = "选门：当前确认窗口不是强欲交互，继续等待。";
+                    return true;
+                }
+
+                doorSelectionGreedTrapConfirmationPending = false;
+                AutoTreasureHuntStatus = "选门：未识别强欲确认文本，未自动点击。";
                 return true;
             }
 
             if (!confirmation->FireCallbackInt(0))
             {
-                AutoTreasureHuntStatus =
-                    $"选门：第 {doorSelectionGreedTrapRoundsCompleted + 1}/5 次确认尚未接受，正在重试。";
+                AutoTreasureHuntStatus = "选门：强欲确认未接受，正在重试。";
                 return true;
             }
 
             doorSelectionGreedTrapConfirmationPending = false;
-            doorSelectionGreedTrapRoundsCompleted++;
-            ResetDoorSelectionGreedTrapState();
-            if (doorSelectionGreedTrapRoundsCompleted >= 5)
-            {
-                doorSelectionGreedTrapFinished = true;
-                AutoTreasureHuntStatus = "选门：强欲五次挑战均已确认完成，恢复副本流程。";
-                return false;
-            }
-
-            doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(500);
-            AutoTreasureHuntStatus =
-                $"选门：第 {doorSelectionGreedTrapRoundsCompleted}/5 次挑战已确认，等待下一次强欲页面。";
+            doorSelectionGreedTrapOutcomePending = true;
+            doorSelectionGreedTrapOutcomeDeadline = now.Add(DoorSelectionGreedTrapAnswerWait);
+            doorSelectionGreedTrapInteractionIssuedAt = now;
+            AutoTreasureHuntStatus = "选门：强欲确认完成，等待游戏结果事件。";
             return true;
         }
 
-        if (!TryFindDoorSelectionGreedTrapAddon(
-                out var addon,
-                out var addonName,
-                out var addonText,
-                out var pageHasGreedTrapSignal))
+        if (!lureOpen && !guessPending)
         {
-            // The challenge page can close for a few framework ticks while
-            // the card page is being rebuilt. Keep the branch active during
-            // that handoff instead of falling back to chest/door navigation.
-            if (doorSelectionGreedTrapPageDetected &&
-                now - doorSelectionGreedTrapLastSeenAt < TimeSpan.FromSeconds(2))
+            if (doorSelectionGreedTrapActive &&
+                doorSelectionGreedTrapLastSeenAt != default &&
+                now - doorSelectionGreedTrapLastSeenAt < DoorSelectionGreedTrapQuietWait())
             {
-                AutoTreasureHuntStatus = "选门：强欲页面正在切换，等待卡牌界面。";
-                return true;
-            }
-
-            if (doorSelectionGreedTrapChallengeAccepted &&
-                now - doorSelectionGreedTrapChallengeAcceptedAt < TimeSpan.FromSeconds(8))
-            {
-                AutoTreasureHuntStatus = "选门：挑战已接受，等待强欲卡牌界面完成切换。";
-                return true;
-            }
-
-            if (TryFindDoorSelectionGreedTrapNotice(out var noticeAddonName, out _))
-            {
-                doorSelectionGreedTrapPageDetected = true;
-                doorSelectionGreedTrapNoticeSeenAt = now;
-                doorSelectionGreedTrapLastSeenAt = now;
-                doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(500);
-                AutoTreasureHuntStatus = "选门：检测到“强欲陷阱”通知，等待完整解除页面出现。";
+                AutoTreasureHuntStatus = "选门：强欲界面正在切换，等待游戏状态稳定。";
                 return true;
             }
 
@@ -7378,108 +7806,257 @@ public sealed class Plugin : IDalamudPlugin
             return false;
         }
 
-        if (pageHasGreedTrapSignal)
-        {
-            doorSelectionGreedTrapPageDetected = true;
-            doorSelectionGreedTrapAddonName = addonName;
-        }
-
+        doorSelectionGreedTrapActive = true;
         doorSelectionGreedTrapLastSeenAt = now;
 
-        if (now < doorSelectionGreedTrapNextActionAt)
+        // The challenge/open buttons have no reliable localized text node;
+        // their component ids and registered events are authoritative.
+        if (lureOpen && !guessPending)
         {
-            AutoTreasureHuntStatus = "选门：检测到强欲陷阱界面，等待游戏 UI 稳定。";
-            return true;
-        }
-
-        var isHighLowAddon = string.Equals(addonName, "TreasureHighLow", StringComparison.OrdinalIgnoreCase);
-        var isCardPage = isHighLowAddon || IsStrongDoorSelectionCardPage(addonText) ||
-                         doorSelectionGreedTrapChallengeAccepted &&
-                         string.Equals(addonName, doorSelectionGreedTrapAddonName, StringComparison.OrdinalIgnoreCase) &&
-                         !IsStrongDoorSelectionGreedTrapPrompt(addonText);
-        var normalizedAddonText = NormalizeDoorSelectionGreedTrapText(addonText);
-        var hasChallengePrompt = IsStrongDoorSelectionGreedTrapPrompt(addonText) ||
-                                  normalizedAddonText.Contains("challenge", StringComparison.Ordinal) &&
-                                  (normalizedAddonText.Contains("disarm", StringComparison.Ordinal) ||
-                                   normalizedAddonText.Contains("remove", StringComparison.Ordinal));
-        if (doorSelectionGreedTrapChallengeAccepted && hasChallengePrompt &&
-            now - doorSelectionGreedTrapChallengeAcceptedAt >= TimeSpan.FromSeconds(2))
-        {
-            doorSelectionGreedTrapChallengeAccepted = false;
-            doorSelectionGreedTrapChallengeAcceptedAt = default;
-            doorSelectionGreedTrapNextActionAt = now;
-        }
-
-        if (hasChallengePrompt)
-        {
-            if (doorSelectionGreedTrapChallengeAccepted)
+            if (now < doorSelectionGreedTrapNextActionAt)
             {
-                AutoTreasureHuntStatus = "选门：挑战回调已发送，等待挑战提示消失并显示新卡牌。";
+                return true;
+            }
+
+            if (doorSelectionGreedTrapOpenCofferPending)
+            {
+                if (now < doorSelectionGreedTrapNextActionAt)
+                {
+                    AutoTreasureHuntStatus = "选门：已选择直接开箱，等待强欲窗口关闭。";
+                    return true;
+                }
+
+                if (doorSelectionGreedTrapOpenCofferAttempts >= DoorSelectionGreedTrapClickAttempts)
+                {
+                    AutoTreasureHuntStatus = "选门：直接开箱按钮未关闭窗口，交由玩家处理。";
+                    return true;
+                }
+
+                doorSelectionGreedTrapOpenCofferAttempts++;
+                if (!TryClickDoorSelectionGreedTrapButton(lureAddon, 47))
+                {
+                    doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(300);
+                    AutoTreasureHuntStatus = "选门：等待直接开箱按钮可用。";
+                    return true;
+                }
+
+                doorSelectionGreedTrapChallengeAcceptedAt = now;
+                doorSelectionGreedTrapNextActionAt = now.Add(DoorSelectionGreedTrapCloseWait);
+                AutoTreasureHuntStatus = "选门：正在重试直接开箱，等待强欲窗口关闭。";
+                return true;
+            }
+
+            if (policy == DoorSelectionGreedTrapPolicy.OpenCoffer ||
+                doorSelectionGreedTrapLureUnattended)
+            {
+                if (doorSelectionGreedTrapOpenCofferPending &&
+                    now - doorSelectionGreedTrapChallengeAcceptedAt < DoorSelectionGreedTrapCloseWait)
+                {
+                    AutoTreasureHuntStatus = "选门：已选择直接开箱，等待强欲窗口关闭。";
+                    return true;
+                }
+
+                if (doorSelectionGreedTrapOpenCofferAttempts >= DoorSelectionGreedTrapClickAttempts)
+                {
+                    AutoTreasureHuntStatus = "选门：直接开箱按钮未关闭窗口，交由玩家处理。";
+                    return true;
+                }
+
+                doorSelectionGreedTrapOpenCofferAttempts++;
+                if (!TryClickDoorSelectionGreedTrapButton(lureAddon, 47))
+                {
+                    AutoTreasureHuntStatus = "选门：等待“直接开箱”按钮可用。";
+                    doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(300);
+                    return true;
+                }
+
+                doorSelectionGreedTrapOpenCofferPending = true;
+                doorSelectionGreedTrapChallengeAcceptedAt = now;
+                doorSelectionGreedTrapNextActionAt = now.Add(DoorSelectionGreedTrapCloseWait);
+                AutoTreasureHuntStatus = doorSelectionGreedTrapLureUnattended
+                    ? "选门：不可读卡牌已随机猜测，后续直接开箱。"
+                    : "选门：正在直接开箱并保留当前奖励。";
+                return true;
+            }
+
+            // The source reads the current reward list before deciding whether
+            // the next share is worth risking. If the list cannot be read,
+            // keep the treasure rather than gamble blind.
+            if (!DoorSelectionGreedTrapLoot.TryReadRareLoot(
+                    gameGui,
+                    dataManager,
+                    out var rareLoot,
+                    out _))
+            {
+                AutoTreasureHuntStatus = "选门：无法读取当前奖励，安全直接开箱。";
+                if (doorSelectionGreedTrapOpenCofferAttempts >= DoorSelectionGreedTrapClickAttempts)
+                    return true;
+
+                doorSelectionGreedTrapOpenCofferAttempts++;
+                if (TryClickDoorSelectionGreedTrapButton(lureAddon, 47))
+                {
+                    doorSelectionGreedTrapOpenCofferPending = true;
+                    doorSelectionGreedTrapChallengeAcceptedAt = now;
+                    doorSelectionGreedTrapNextActionAt = now.Add(DoorSelectionGreedTrapCloseWait);
+                }
+                else
+                {
+                    doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(300);
+                }
+
+                return true;
+            }
+
+            var nextChallenge = GetDoorSelectionGreedTrapNextChallenge();
+            int? nextCard = null;
+            var nextCardRaw = (ushort)0;
+            if (nextChallenge > 1)
+            {
+                nextCard = TryReadDoorSelectionGreedTrapCardFace(left: false, out nextCardRaw);
+            }
+
+            var shouldChallenge = !doorSelectionGreedTrapLureUnattended &&
+                                  WorthChallenging(nextChallenge, nextCard, rareLoot.Count > 0);
+            if (!shouldChallenge)
+            {
+                AutoTreasureHuntStatus = nextChallenge > DoorSelectionGreedTrapGameChallenges
+                    ? "选门：强欲挑战次数已达上限，直接开箱。"
+                    : nextCard is null && nextChallenge > 1
+                        ? $"选门：第 {nextChallenge}/5 次下一张卡不可读，安全直接开箱。"
+                        : rareLoot.Count > 0
+                            ? $"选门：第 {nextChallenge}/5 次存在稀有奖励或胜率不足，直接开箱。"
+                            : $"选门：第 {nextChallenge}/5 次胜率不足，直接开箱。";
+                if (doorSelectionGreedTrapOpenCofferAttempts >= DoorSelectionGreedTrapClickAttempts)
+                    return true;
+
+                doorSelectionGreedTrapOpenCofferAttempts++;
+                if (TryClickDoorSelectionGreedTrapButton(lureAddon, 47))
+                {
+                    doorSelectionGreedTrapOpenCofferPending = true;
+                    doorSelectionGreedTrapChallengeAcceptedAt = now;
+                    doorSelectionGreedTrapNextActionAt = now.Add(DoorSelectionGreedTrapCloseWait);
+                }
+                else
+                {
+                    doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(300);
+                }
+
+                return true;
+            }
+
+            if (doorSelectionGreedTrapChallengeAccepted &&
+                now - doorSelectionGreedTrapChallengeAcceptedAt < DoorSelectionGreedTrapCloseWait)
+            {
+                AutoTreasureHuntStatus = "选门：挑战已发送，等待强欲窗口切换到大/小阶段。";
+                return true;
+            }
+
+            if (doorSelectionGreedTrapChallengeAttempts >= DoorSelectionGreedTrapClickAttempts)
+            {
+                AutoTreasureHuntStatus = "选门：挑战窗口连续三次未关闭，按源项目保留窗口交由玩家处理。";
+                return true;
+            }
+
+            if (now < doorSelectionGreedTrapNextActionAt)
+            {
+                AutoTreasureHuntStatus = "选门：强欲窗口已打开，等待 UI 稳定。";
+                return true;
+            }
+
+            doorSelectionGreedTrapChallengeAttempts++;
+            if (!TryClickDoorSelectionGreedTrapButton(lureAddon, 46))
+            {
+                AutoTreasureHuntStatus = "选门：等待“挑战解除陷阱”按钮可用。";
                 doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(300);
                 return true;
             }
 
-            doorSelectionGreedTrapPreChallengeNumbers ??= ReadDoorSelectionHighLowNumberArray();
-            greedCardImageSignatureBeforeChallenge = DescribeDoorSelectionImageNodeDetails(addon);
-            doorSelectionGreedTrapRefreshedCardValue = 0;
-            doorSelectionGreedTrapCardValueRefreshedAt = default;
-            doorSelectionGreedTrapPreviousRefreshIntegers.Clear();
-            var clickedChallengeButton = TryFireDoorSelectionChallengeButton(addon, out _);
+            doorSelectionGreedTrapChallengeAccepted = true;
+            doorSelectionGreedTrapChallengeAcceptedAt = now;
+            doorSelectionGreedTrapNextActionAt = now.Add(DoorSelectionGreedTrapCloseWait);
+            AutoTreasureHuntStatus = "选门：已点击挑战解除陷阱，等待大/小物体出现。";
+            return true;
+        }
 
-            if (clickedChallengeButton)
+        if (!guessPending)
+        {
+            AutoTreasureHuntStatus = "选门：已接受强欲挑战，等待大/小物体可选中。";
+            return true;
+        }
+
+        // AskMe and OpenCoffer only choose how the initial lure window is
+        // answered. If the player challenges manually, leave the resulting
+        // high/low guess to the player and post the same hint as the source.
+        if (policy != DoorSelectionGreedTrapPolicy.Auto)
+        {
+            PublishDoorSelectionGreedTrapCardHint(now);
+            AutoTreasureHuntStatus = "选门：强欲卡牌等待玩家选择大/小。";
+            return true;
+        }
+
+        if (doorSelectionGreedTrapCardDealtAt == default)
+            doorSelectionGreedTrapCardDealtAt = now;
+
+        var cardValue = TryReadDoorSelectionGreedTrapCardFace(left: true, out var cardMask);
+        if (cardValue is < 1 or > 9)
+        {
+            var cardAge = now - doorSelectionGreedTrapCardDealtAt;
+            if (cardAge < DoorSelectionGreedTrapCardReadWait)
             {
-                doorSelectionGreedTrapChallengeAccepted = true;
-                doorSelectionGreedTrapChallengeAcceptedAt = now;
-                doorSelectionGreedTrapNextActionAt = DateTime.UtcNow.AddMilliseconds(900);
-                AutoTreasureHuntStatus = "选门：已触发挑战解除陷阱按钮事件，等待 TreasureHighLow 卡牌界面。";
+                AutoTreasureHuntStatus = $"选门：等待左侧卡牌翻面（当前掩码 0x{cardMask:X}）。";
+                doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(200);
+                return true;
             }
-            else
+
+            if (cardAge < DoorSelectionGreedTrapGuessWait)
             {
-                doorSelectionGreedTrapNextActionAt = DateTime.UtcNow.AddMilliseconds(500);
-                AutoTreasureHuntStatus = "选门：强欲陷阱挑战按钮尚未接受，正在重试。";
+                AutoTreasureHuntStatus = "选门：左侧卡牌暂时不可读，按源项目继续等待玩家/服务器翻牌。";
+                doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(500);
+                return true;
             }
 
-            return true;
+            // Never blind-guess while another SelectYesno belongs to a
+            // different interaction (party invite, chest, teleport, etc.).
+            // Let that prompt close before the lure's safety timeout is used.
+            var selectYesno = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
+            if (selectYesno != null && selectYesno->IsReady && selectYesno->IsVisible)
+            {
+                doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(500);
+                return true;
+            }
+
+            // Source Auto mode uses a coin toss after the unreadable-card
+            // deadline so the lure cannot expire and delete the treasure.
+            var randomChoice = Random.Shared.Next(2) == 0
+                ? DoorSelectionGreedTrapChoice.Large
+                : DoorSelectionGreedTrapChoice.Small;
+            doorSelectionGreedTrapLureUnattended = true;
+            doorSelectionGreedTrapChoice = randomChoice;
+            AutoTreasureHuntStatus =
+                $"选门：卡牌超过 60 秒仍不可读，按源项目随机选择{GetDoorSelectionGreedTrapChoiceName(randomChoice)}。";
+            return TryMoveToDoorSelectionGreedTrapChoice(randomChoice, now, cardValue: null);
         }
 
-        if (!doorSelectionGreedTrapChallengeAccepted)
-        {
-            AutoTreasureHuntStatus = "选门：已进入强欲陷阱页面，等待“挑战解除陷阱”按钮。";
-            doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(300);
-            return true;
-        }
-
-        if (!isCardPage)
-        {
-            AutoTreasureHuntStatus = $"选门：已接受强欲挑战，等待卡牌界面（当前 Addon {addonName}）。";
-            doorSelectionGreedTrapNextActionAt = now.AddMilliseconds(300);
-            return true;
-        }
-
-        doorSelectionGreedTrapLeftCardValue = TryReadDoorSelectionLeftCardValue(addon);
-        if (doorSelectionGreedTrapLeftCardValue is < 1 or > 9 &&
-            doorSelectionGreedTrapCardValueRefreshedAt != default &&
-            now - doorSelectionGreedTrapCardValueRefreshedAt <= TimeSpan.FromSeconds(5))
-        {
-            doorSelectionGreedTrapLeftCardValue = doorSelectionGreedTrapRefreshedCardValue;
-        }
-        if (doorSelectionGreedTrapLeftCardValue is < 1 or > 9)
-        {
-            AutoTreasureHuntStatus = "选门：强欲陷阱已解除，正在读取左侧卡牌点数。";
-            doorSelectionGreedTrapNextActionAt = DateTime.UtcNow.AddMilliseconds(300);
-            return true;
-        }
-
-        // 1~4: choose large; 6~9: choose small; 5: either side.
-        var choice = GetDoorSelectionGreedTrapChoice(doorSelectionGreedTrapLeftCardValue);
+        var card = cardValue.GetValueOrDefault();
+        doorSelectionGreedTrapLeftCardValue = card;
+        var choice = GetDoorSelectionGreedTrapChoice(card);
         doorSelectionGreedTrapChoice = choice;
+        return TryMoveToDoorSelectionGreedTrapChoice(choice, now, card);
+    }
 
+    private unsafe bool TryMoveToDoorSelectionGreedTrapChoice(
+        DoorSelectionGreedTrapChoice choice,
+        DateTime now,
+        int? cardValue)
+    {
         var target = FindDoorSelectionGreedTrapChoiceObject(choice);
         if (target == null)
         {
             commandManager.ProcessCommand("/vnav stop");
             ResetDoorSelectionGreedTrapObjectTarget();
-            AutoTreasureHuntStatus = $"选门：左侧卡牌点数为 {doorSelectionGreedTrapLeftCardValue}，等待场上可交互的{GetDoorSelectionGreedTrapChoiceName(choice)}物体。";
+            AutoTreasureHuntStatus = cardValue is { } value
+                ? $"选门：左侧卡牌点数为 {value}，等待可交互的{GetDoorSelectionGreedTrapChoiceName(choice)}物体。"
+                : $"选门：等待可交互的{GetDoorSelectionGreedTrapChoiceName(choice)}物体。";
             return true;
         }
 
@@ -7495,56 +8072,59 @@ public sealed class Plugin : IDalamudPlugin
             var position = target.Position;
             var command = FormattableString.Invariant($"/vnav moveto {position.X:F3} {position.Y:F3} {position.Z:F3}");
             doorSelectionGreedTrapMoveIssued = commandManager.ProcessCommand(command);
-            AutoTreasureHuntStatus = $"选门：左侧卡牌点数为 {doorSelectionGreedTrapLeftCardValue}，正在前往{GetDoorSelectionGreedTrapChoiceName(choice)}物体。";
+            AutoTreasureHuntStatus = cardValue is { } value
+                ? $"选门：左侧卡牌点数为 {value}，正在前往{GetDoorSelectionGreedTrapChoiceName(choice)}物体。"
+                : $"选门：正在前往{GetDoorSelectionGreedTrapChoiceName(choice)}物体。";
             return true;
         }
 
-        var localPlayer = objectTable.LocalPlayer;
-        if (localPlayer == null)
-        {
-            AutoTreasureHuntStatus = "选门：暂时无法取得角色坐标，等待交互目标。";
+        var player = objectTable.LocalPlayer;
+        if (player == null)
             return true;
-        }
 
         const float interactionDistance = 2.5f;
-        if (System.Numerics.Vector3.DistanceSquared(localPlayer.Position, target.Position) >
+        if (System.Numerics.Vector3.DistanceSquared(player.Position, target.Position) >
             interactionDistance * interactionDistance)
         {
             doorSelectionGreedTrapPositionSampleValid = false;
-            AutoTreasureHuntStatus = $"选门：正在前往{GetDoorSelectionGreedTrapChoiceName(choice)}物体。";
             return true;
         }
 
-        var playerPosition = localPlayer.Position;
         if (!doorSelectionGreedTrapPositionSampleValid)
         {
             commandManager.ProcessCommand("/vnav stop");
             doorSelectionGreedTrapPositionSampleValid = true;
-            doorSelectionGreedTrapSampleX = playerPosition.X;
-            doorSelectionGreedTrapSampleY = playerPosition.Y;
-            doorSelectionGreedTrapSampleZ = playerPosition.Z;
+            doorSelectionGreedTrapSampleX = player.Position.X;
+            doorSelectionGreedTrapSampleY = player.Position.Y;
+            doorSelectionGreedTrapSampleZ = player.Position.Z;
             doorSelectionGreedTrapPositionStableSince = now;
-            AutoTreasureHuntStatus = $"选门：已靠近{GetDoorSelectionGreedTrapChoiceName(choice)}物体，等待角色稳定后交互。";
             return true;
         }
 
         const float movementTolerance = 0.05f;
-        if (MathF.Abs(playerPosition.X - doorSelectionGreedTrapSampleX) > movementTolerance ||
-            MathF.Abs(playerPosition.Y - doorSelectionGreedTrapSampleY) > movementTolerance ||
-            MathF.Abs(playerPosition.Z - doorSelectionGreedTrapSampleZ) > movementTolerance)
+        if (MathF.Abs(player.Position.X - doorSelectionGreedTrapSampleX) > movementTolerance ||
+            MathF.Abs(player.Position.Y - doorSelectionGreedTrapSampleY) > movementTolerance ||
+            MathF.Abs(player.Position.Z - doorSelectionGreedTrapSampleZ) > movementTolerance)
         {
-            doorSelectionGreedTrapSampleX = playerPosition.X;
-            doorSelectionGreedTrapSampleY = playerPosition.Y;
-            doorSelectionGreedTrapSampleZ = playerPosition.Z;
+            doorSelectionGreedTrapSampleX = player.Position.X;
+            doorSelectionGreedTrapSampleY = player.Position.Y;
+            doorSelectionGreedTrapSampleZ = player.Position.Z;
             doorSelectionGreedTrapPositionStableSince = now;
             return true;
         }
 
-        if (now - doorSelectionGreedTrapPositionStableSince < TimeSpan.FromMilliseconds(500))
+        if (now - doorSelectionGreedTrapPositionStableSince < TimeSpan.FromMilliseconds(300))
             return true;
 
         commandManager.ProcessCommand("/vnav stop");
         targetManager.Target = target;
+        var promptBefore = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
+        doorSelectionGreedTrapPromptWasVisibleBeforeInteraction =
+            promptBefore != null && promptBefore->IsReady && promptBefore->IsVisible;
+        doorSelectionGreedTrapPromptHiddenAt = doorSelectionGreedTrapPromptWasVisibleBeforeInteraction
+            ? default
+            : now;
+        doorSelectionGreedTrapInteractionIssuedAt = now;
         if (InteractWithGameObject(target, checkLineOfSight: false) == 0)
         {
             doorSelectionGreedTrapMoveIssued = false;
@@ -7553,96 +8133,156 @@ public sealed class Plugin : IDalamudPlugin
             return true;
         }
 
-        AutoTreasureHuntStatus = $"选门：已交互{GetDoorSelectionGreedTrapChoiceName(choice)}物体，等待强欲页面关闭。";
-        doorSelectionGreedTrapConfirmationPending = true;
-        AutoTreasureHuntStatus =
-            $"选门：第 {doorSelectionGreedTrapRoundsCompleted + 1}/5 次已交互{GetDoorSelectionGreedTrapChoiceName(choice)}，等待确认。";
         ResetDoorSelectionGreedTrapObjectTarget();
+        doorSelectionGreedTrapConfirmationPending = true;
+        doorSelectionGreedTrapConfirmationDeadline = now.Add(DoorSelectionGreedTrapAnswerWait);
+        AutoTreasureHuntStatus = $"选门：第 {doorSelectionGreedTrapRoundsCompleted + 1}/5 次已交互{GetDoorSelectionGreedTrapChoiceName(choice)}，等待确认。";
         return true;
     }
 
-    private static unsafe bool TryFireDoorSelectionChallengeButton(AtkUnitBase* addon, out string route)
+    // Component-event dispatch is kept in one unsafe helper so every policy
+    // (challenge and open-coffer) follows the same native callback path.
+    private static unsafe bool TryClickDoorSelectionGreedTrapButton(AtkUnitBase* addon, ushort componentId)
     {
-        route = string.Empty;
-        if (addon == null)
-            return false;
-
-        if (TryFireDoorSelectionSelectStringChallenge(addon))
+        unsafe
         {
-            route = "SelectString ListItemClick";
+            if (addon == null || !addon->IsReady || !addon->IsVisible)
+                return false;
+
+            var button = addon->GetComponentButtonById(componentId);
+            if (button == null || !button->IsEnabled ||
+                !button->AtkResNode->IsVisible())
+            {
+                return false;
+            }
+
+            var owner = button->AtkComponentBase.OwnerNode;
+            var gameEvent = owner == null
+                ? null
+                : owner->AtkResNode.AtkEventManager.Event;
+            if (gameEvent == null)
+                return false;
+
+            addon->ReceiveEvent(gameEvent->State.EventType, (int)gameEvent->Param, gameEvent);
             return true;
         }
-
-        if (addon->UldManager.NodeList == null)
-            return false;
-
-        for (var index = 0; index < addon->UldManager.NodeListCount; index++)
-        {
-            var textNode = addon->UldManager.NodeList[index];
-            if (textNode == null || textNode->Type != NodeType.Text)
-                continue;
-
-            var text = NormalizeDoorSelectionGreedTrapText(
-                ((AtkTextNode*)textNode)->NodeText.ToString());
-            if (!IsStrongDoorSelectionGreedTrapPrompt(text))
-                continue;
-
-            // ScreenInfoBack buttons are wired through their registered node
-            // events rather than a SelectString-style callback index.
-            for (var buttonNode = textNode; buttonNode != null; buttonNode = buttonNode->ParentNode)
-            {
-                for (var evt = buttonNode->AtkEventManager.Event; evt != null; evt = evt->NextEvent)
-                {
-                    if (evt->State.EventType != AtkEventType.ButtonClick || evt->Listener == null)
-                        continue;
-
-                    evt->Listener->ReceiveEvent(
-                        AtkEventType.ButtonClick,
-                        (int)evt->Param,
-                        evt,
-                        null);
-                    route = $"ButtonClick node={buttonNode->NodeId} param={evt->Param}";
-                    return true;
-                }
-            }
-        }
-
-        return false;
     }
 
-    private static unsafe bool TryFireDoorSelectionSelectStringChallenge(AtkUnitBase* addon)
+    private int GetDoorSelectionGreedTrapNextChallenge()
     {
-        if (!string.Equals(ReadAddonName(addon), "SelectString", StringComparison.OrdinalIgnoreCase))
-            return false;
-
-        var selectString = (AddonSelectString*)addon;
-        var popupMenu = &selectString->PopupMenu;
-        if (popupMenu->EntryNames == null || popupMenu->List == null || popupMenu->EntryCount <= 0)
-            return false;
-
-        var itemCount = Math.Min(popupMenu->EntryCount, popupMenu->List->GetItemCount());
-        for (var index = 0; index < itemCount; index++)
+        if (doorSelectionGreedTrapLastRoundLogAt >= doorSelectionGreedTrapRoundStartedAt &&
+            doorSelectionGreedTrapLastLoggedRound is >= 1 and < DoorSelectionGreedTrapGameChallenges)
         {
-            var entryText = NormalizeDoorSelectionGreedTrapText(popupMenu->EntryNames[index].ToString());
-            var isChallengeEntry = IsStrongDoorSelectionGreedTrapPrompt(entryText) ||
-                                   entryText.Contains("challenge", StringComparison.Ordinal) &&
-                                   (entryText.Contains("disarm", StringComparison.Ordinal) ||
-                                    entryText.Contains("remove", StringComparison.Ordinal));
-            if (!isChallengeEntry)
-                continue;
-
-            popupMenu->List->SelectItem(index, dispatchEvent: false);
-            popupMenu->List->DispatchItemEvent(index, AtkEventType.ListItemClick);
-            return true;
+            return Math.Clamp(doorSelectionGreedTrapLastLoggedRound + 1, 1, DoorSelectionGreedTrapGameChallenges + 1);
         }
 
-        return false;
+        return Math.Clamp(
+            doorSelectionGreedTrapRoundsCompleted + 1,
+            1,
+            DoorSelectionGreedTrapGameChallenges + 1);
+    }
+
+    private static bool WorthChallenging(int next, int? card, bool rare)
+    {
+        if (next == 1)
+            return !rare;
+
+        if (next > DoorSelectionGreedTrapGameChallenges || card is not { } value)
+            return false;
+
+        var wins = Math.Max(9 - value, value - 1);
+        if (rare)
+            return wins >= 6;
+
+        return next switch
+        {
+            2 => value != DoorSelectionGreedTrapMiddleCard,
+            3 => wins >= 6,
+            _ => wins >= 7,
+        };
+    }
+
+    private void CommitDoorSelectionGreedTrapRound()
+    {
+        doorSelectionGreedTrapOutcomePending = false;
+        doorSelectionGreedTrapLastResultWasTie = false;
+
+        var completed = doorSelectionGreedTrapRoundsCompleted + 1;
+        if (doorSelectionGreedTrapLastRoundLogAt >= doorSelectionGreedTrapInteractionIssuedAt &&
+            doorSelectionGreedTrapLastLoggedRound > 0)
+        {
+            completed = Math.Max(completed, doorSelectionGreedTrapLastLoggedRound);
+        }
+
+        doorSelectionGreedTrapRoundsCompleted = Math.Clamp(
+            completed,
+            0,
+            DoorSelectionGreedTrapGameChallenges);
+        doorSelectionGreedTrapAwaitingChoiceClear = true;
+        doorSelectionGreedTrapChoiceClearDeadline = DateTime.UtcNow.Add(DoorSelectionGreedTrapAnswerWait);
+        doorSelectionGreedTrapCardDealtAt = default;
+        doorSelectionGreedTrapChallengeAccepted = false;
+        doorSelectionGreedTrapChallengeAttempts = 0;
+        doorSelectionGreedTrapOpenCofferAttempts = 0;
+        doorSelectionGreedTrapOpenCofferPending = false;
+        ResetDoorSelectionGreedTrapObjectTarget();
+        AutoTreasureHuntStatus =
+            $"选门：第 {doorSelectionGreedTrapRoundsCompleted}/5 次确认完成，等待场景清理。";
+    }
+
+    private static bool IsDoorSelectionGreedTrapConfirmationPrompt(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var normalized = text.Replace(" ", string.Empty, StringComparison.Ordinal)
+            .Replace("\t", string.Empty, StringComparison.Ordinal)
+            .Replace("\r", string.Empty, StringComparison.Ordinal)
+            .Replace("\n", string.Empty, StringComparison.Ordinal)
+            .ToLowerInvariant();
+
+        // English clients have used both "Gambler's Lure" and "trap" in the
+        // prompt.  Chinese clients vary by patch, so accept the stable lure,
+        // trap and chest terms but never a generic SelectYesno alone.
+        var lure = normalized.Contains("lure", StringComparison.Ordinal) ||
+                   normalized.Contains("gambler", StringComparison.Ordinal) ||
+                   normalized.Contains("trap", StringComparison.Ordinal) ||
+                   normalized.Contains("high", StringComparison.Ordinal) && normalized.Contains("low", StringComparison.Ordinal) ||
+                   normalized.Contains("\u5f3a\u6b32", StringComparison.Ordinal) ||
+                   normalized.Contains("\u9677\u9631", StringComparison.Ordinal) ||
+                   normalized.Contains("\u5b9d\u7bb1", StringComparison.Ordinal);
+        var action = normalized.Contains("guess", StringComparison.Ordinal) ||
+                     normalized.Contains("challenge", StringComparison.Ordinal) ||
+                     normalized.Contains("disarm", StringComparison.Ordinal) ||
+                     normalized.Contains("remove", StringComparison.Ordinal) ||
+                     normalized.Contains("coffer", StringComparison.Ordinal) ||
+                     normalized.Contains("chest", StringComparison.Ordinal) ||
+                     normalized.Contains("\u89e3\u9664", StringComparison.Ordinal) ||
+                     normalized.Contains("\u5927", StringComparison.Ordinal) ||
+                     normalized.Contains("\u5c0f", StringComparison.Ordinal);
+        var pairedSides = normalized.Contains("high", StringComparison.Ordinal) &&
+                          normalized.Contains("low", StringComparison.Ordinal) ||
+                          normalized.Contains("large", StringComparison.Ordinal) &&
+                          normalized.Contains("small", StringComparison.Ordinal);
+        return pairedSides || lure && action;
+    }
+
+    private static unsafe string DescribeDoorSelectionGreedChallengeButton(AtkUnitBase* addon)
+    {
+        if (addon == null)
+            return "窗口不存在";
+
+        var button = addon->GetComponentButtonById(46);
+        if (button == null)
+            return "节点 46 不存在";
+
+        return $"启用={button->IsEnabled},可见={button->AtkResNode->IsVisible()}";
     }
 
     private static DoorSelectionGreedTrapChoice GetDoorSelectionGreedTrapChoice(int cardValue)
     {
-        // Five is neutral; choosing large keeps the interaction deterministic.
-        return cardValue is <= 4 or 5
+        // Match AutoTreasureMaps: 1~4 is 大, 6~9 is 小, and 5 is a coin toss.
+        return cardValue < 5 || (cardValue == 5 && Random.Shared.Next(2) == 0)
             ? DoorSelectionGreedTrapChoice.Large
             : DoorSelectionGreedTrapChoice.Small;
     }
@@ -7652,15 +8292,58 @@ public sealed class Plugin : IDalamudPlugin
         return choice == DoorSelectionGreedTrapChoice.Large ? "大" : "小";
     }
 
+    private void PublishDoorSelectionGreedTrapCardHint(DateTime now)
+    {
+        var card = TryReadDoorSelectionGreedTrapCardFace(left: true, out _);
+        if (card is not { } cardValue || cardValue is < 1 or > 9)
+        {
+            return;
+        }
+
+        // The same card remains targetable for many framework ticks.  The
+        // source posts one hint per dealt card, so suppress repeated chat
+        // lines while still allowing a tie/new round with the same value to
+        // produce a fresh hint after the state reset.
+        if (cardValue == doorSelectionGreedTrapLastHintedCardValue &&
+            now - doorSelectionGreedTrapLastHintAt < TimeSpan.FromSeconds(30))
+        {
+            return;
+        }
+
+        doorSelectionGreedTrapLastHintedCardValue = cardValue;
+        doorSelectionGreedTrapLastHintAt = now;
+        var choice = GetDoorSelectionGreedTrapChoice(cardValue);
+        chatGui.Print($"强欲：左侧卡牌点数为 {cardValue}，建议选择{GetDoorSelectionGreedTrapChoiceName(choice)}。", "自动挖宝");
+    }
+
+    private void TrackDoorSelectionGreedTrapGuessCompletion(bool guessPending)
+    {
+        // After the source's unreadable-card coin toss, a later manual guess
+        // turns automatic challenges back on.  The transition is observable
+        // without guessing at ownership: our own guess always leaves one of
+        // the confirmation/outcome/choice-clear guards set, while a player
+        // guess does not.
+        if (doorSelectionGreedTrapLureUnattended &&
+            doorSelectionGreedTrapGuessWasPending && !guessPending &&
+            !doorSelectionGreedTrapConfirmationPending &&
+            !doorSelectionGreedTrapOutcomePending &&
+            !doorSelectionGreedTrapAwaitingChoiceClear &&
+            !doorSelectionGreedTrapChallengeAccepted)
+        {
+            doorSelectionGreedTrapLureUnattended = false;
+            doorSelectionGreedTrapLastResultWasTie = false;
+            AutoTreasureHuntStatus = "选门：检测到玩家已手动猜牌，恢复后续强欲自动挑战。";
+        }
+
+        doorSelectionGreedTrapGuessWasPending = guessPending;
+    }
+
     private Dalamud.Game.ClientState.Objects.Types.IGameObject? FindDoorSelectionGreedTrapChoiceObject(
         DoorSelectionGreedTrapChoice choice)
     {
-        var expectedBaseId = choice == DoorSelectionGreedTrapChoice.Large
-            ? DoorSelectionGreedTrapLargeBaseId
-            : DoorSelectionGreedTrapSmallBaseId;
         return objectTable
             .Where(gameObject => gameObject.IsTargetable &&
-                gameObject.BaseId == expectedBaseId &&
+                gameObject.BaseId is >= DoorSelectionGreedTrapFirstChoiceBaseId and <= DoorSelectionGreedTrapLastChoiceBaseId &&
                 IsDoorSelectionGreedTrapChoiceObject(gameObject, choice))
             .OrderBy(gameObject => System.Numerics.Vector3.DistanceSquared(
                 objectTable.LocalPlayer?.Position ?? gameObject.Position,
@@ -7675,33 +8358,12 @@ public sealed class Plugin : IDalamudPlugin
         if (!string.Equals(gameObject.ObjectKind.ToString(), "EventObj", StringComparison.OrdinalIgnoreCase))
             return false;
 
-        if (gameObject.BaseId is DoorSelectionGreedTrapLargeBaseId or DoorSelectionGreedTrapSmallBaseId)
-        {
-            var expectedBaseId = choice == DoorSelectionGreedTrapChoice.Large
-                ? DoorSelectionGreedTrapLargeBaseId
-                : DoorSelectionGreedTrapSmallBaseId;
-            return gameObject.BaseId == expectedBaseId;
-        }
-
-        var name = NormalizeDoorSelectionGreedTrapText(gameObject.Name.TextValue);
-        if (string.IsNullOrWhiteSpace(name) ||
-            name.Contains("宝箱", StringComparison.Ordinal) ||
-            name.Contains("门", StringComparison.Ordinal) ||
-            name.Contains("出口", StringComparison.Ordinal) ||
-            name.Contains("exit", StringComparison.Ordinal))
-        {
+        if (gameObject.BaseId is < DoorSelectionGreedTrapFirstChoiceBaseId or > DoorSelectionGreedTrapLastChoiceBaseId)
             return false;
-        }
 
-        var isLarge = name.Contains("大", StringComparison.Ordinal) ||
-                      name.Contains("高", StringComparison.Ordinal) ||
-                      name.Contains("high", StringComparison.Ordinal) ||
-                      name.Contains("large", StringComparison.Ordinal);
-        var isSmall = name.Contains("小", StringComparison.Ordinal) ||
-                      name.Contains("低", StringComparison.Ordinal) ||
-                      name.Contains("low", StringComparison.Ordinal) ||
-                      name.Contains("small", StringComparison.Ordinal);
-        return choice == DoorSelectionGreedTrapChoice.Large ? isLarge && !isSmall : isSmall && !isLarge;
+        // AutoTreasureMaps uses the row parity: even BaseID is 大, odd is 小.
+        var isLarge = (gameObject.BaseId & 1u) == 0;
+        return choice == DoorSelectionGreedTrapChoice.Large ? isLarge : !isLarge;
     }
 
     private void ResetDoorSelectionGreedTrapObjectTarget()
@@ -8057,6 +8719,35 @@ public sealed class Plugin : IDalamudPlugin
             .ToLowerInvariant();
     }
 
+    private static bool TryRecordDoorSelectionGreedTrapEvent(string text)
+    {
+        var normalized = NormalizeDoorSelectionGreedTrapText(text);
+        if (normalized.Length == 0)
+            return false;
+
+        var hasGreed = normalized.Contains("强欲", StringComparison.Ordinal) ||
+                       normalized.Contains("強欲", StringComparison.Ordinal) ||
+                       normalized.Contains("贪欲", StringComparison.Ordinal) ||
+                       normalized.Contains("greed", StringComparison.Ordinal);
+        var hasTrap = normalized.Contains("陷阱", StringComparison.Ordinal) ||
+                      normalized.Contains("罠", StringComparison.Ordinal) ||
+                      normalized.Contains("trap", StringComparison.Ordinal);
+        var hasLureResult = normalized.Contains("平局", StringComparison.Ordinal) ||
+                            normalized.Contains("解除成功", StringComparison.Ordinal) ||
+                            normalized.Contains("解除失败", StringComparison.Ordinal) ||
+                            normalized.Contains("lure", StringComparison.Ordinal);
+        return hasGreed && hasTrap || hasGreed && hasLureResult || hasLureResult && hasTrap;
+    }
+
+    private static bool IsDoorSelectionGreedTrapLureStartText(string text)
+    {
+        var normalized = NormalizeDoorSelectionGreedTrapText(text);
+        return normalized.Contains("\u8bbe\u7f6e\u4e86\u5f3a\u6b32\u9677\u9631", StringComparison.Ordinal) ||
+               normalized.Contains("lureisset", StringComparison.Ordinal) ||
+               normalized.Contains("luresprung", StringComparison.Ordinal) ||
+               normalized.Contains("gambler'slureisset", StringComparison.Ordinal);
+    }
+
     private static unsafe string ReadAddonName(AtkUnitBase* addon)
     {
         if (addon == null)
@@ -8072,6 +8763,17 @@ public sealed class Plugin : IDalamudPlugin
 
     private void ResetDoorSelectionGreedTrapState()
     {
+        doorSelectionGreedTrapActive = false;
+        doorSelectionGreedTrapRoundsCompleted = 0;
+        doorSelectionGreedTrapFinished = false;
+        doorSelectionGreedTrapAwaitingChoiceClear = false;
+        doorSelectionGreedTrapChoiceClearDeadline = default;
+        doorSelectionGreedTrapConfirmationDeadline = default;
+        doorSelectionGreedTrapCardDealtAt = default;
+        doorSelectionGreedTrapChallengeAttempts = 0;
+        doorSelectionGreedTrapOpenCofferAttempts = 0;
+        doorSelectionGreedTrapLastLureEventAt = default;
+        doorSelectionGreedTrapNavigationStopped = false;
         doorSelectionGreedTrapNextActionAt = default;
         doorSelectionGreedTrapChallengeAccepted = false;
         doorSelectionGreedTrapChallengeAcceptedAt = default;
@@ -8081,12 +8783,47 @@ public sealed class Plugin : IDalamudPlugin
         doorSelectionGreedTrapCardValueRefreshedAt = default;
         doorSelectionGreedTrapPreviousRefreshIntegers.Clear();
         doorSelectionGreedTrapChoice = null;
+        doorSelectionGreedTrapOutcomePending = false;
+        doorSelectionGreedTrapOutcomeDeadline = default;
+        doorSelectionGreedTrapInteractionIssuedAt = default;
+        doorSelectionGreedTrapPromptWasVisibleBeforeInteraction = false;
+        doorSelectionGreedTrapPromptHiddenAt = default;
+        doorSelectionGreedTrapLastTieAt = default;
+        doorSelectionGreedTrapLastRoundLogAt = default;
+        doorSelectionGreedTrapLastLoggedRound = 0;
+        doorSelectionGreedTrapLastDisarmAt = default;
+        doorSelectionGreedTrapLastTerminalLogAt = default;
+        doorSelectionGreedTrapLastTerminalLogId = 0;
+        doorSelectionGreedTrapLastLureEventId = 0;
+        doorSelectionGreedTrapLastHintedCardValue = 0;
+        doorSelectionGreedTrapLastHintAt = default;
+        doorSelectionGreedTrapGuessWasPending = false;
+        doorSelectionGreedTrapLureUnattended = false;
+        doorSelectionGreedTrapLastResultWasTie = false;
+        doorSelectionGreedTrapOpenCofferPending = false;
+        doorSelectionGreedTrapRoundStartedAt = default;
         ResetDoorSelectionGreedTrapObjectTarget();
         doorSelectionGreedTrapPageDetected = false;
         doorSelectionGreedTrapAddonName = string.Empty;
         doorSelectionGreedTrapLastSeenAt = default;
-        doorSelectionGreedTrapNoticeSeenAt = default;
         doorSelectionGreedTrapNextFullScanAt = default;
+    }
+
+    private void BeginDoorSelectionGreedTrapLure(DateTime now, uint logMessageId)
+    {
+        // LureSprung marks a new Gambler's Lure.  Clear all round, prompt,
+        // target and hint state so a delayed callback from the prior coffer
+        // cannot advance this one.  The unattended flag intentionally spans
+        // lures until the player makes a manual guess, matching the source
+        // plugin's safe-after-blind-guess behavior.
+        var unattended = doorSelectionGreedTrapLureUnattended;
+        ResetDoorSelectionGreedTrapState();
+        doorSelectionGreedTrapLureUnattended = unattended;
+        doorSelectionGreedTrapActive = true;
+        doorSelectionGreedTrapRoundStartedAt = now;
+        doorSelectionGreedTrapLastLureEventAt = now;
+        doorSelectionGreedTrapLastSeenAt = now;
+        doorSelectionGreedTrapLastLureEventId = logMessageId;
     }
 
     private static unsafe string ReadAddonText(AtkUnitBase* addon)
@@ -8149,32 +8886,158 @@ public sealed class Plugin : IDalamudPlugin
 
     private unsafe int TryReadDoorSelectionLeftCardValue(AtkUnitBase* addon)
     {
-        if (addon == null)
-            return 0;
+        _ = addon;
+        return TryReadDoorSelectionGreedTrapCardFace(left: true, out _) ?? 0;
+    }
 
-        var candidates = new List<(float X, int Value)>();
-        var visited = new HashSet<nint>();
-        CollectDoorSelectionCardValues(addon->UldManager.RootNode, candidates, visited);
-        for (var index = 0;
-             addon->UldManager.NodeList != null && index < addon->UldManager.NodeListCount;
-             index++)
+    // The lure's choices are the authoritative signal.  They are targetable
+    // only during the short window in which a guess is expected.
+    private bool DoorSelectionGreedTrapGuessPending()
+    {
+        foreach (var gameObject in objectTable)
         {
-            var node = addon->UldManager.NodeList[index];
-            CollectDoorSelectionCardValues(node, candidates, visited);
+            if (gameObject.ObjectKind == Dalamud.Game.ClientState.Objects.Enums.ObjectKind.EventObj &&
+                gameObject.BaseId is >= DoorSelectionGreedTrapFirstChoiceBaseId and <= DoorSelectionGreedTrapLastChoiceBaseId &&
+                gameObject.IsTargetable)
+            {
+                return true;
+            }
         }
 
-        // The two visible card values are positioned in the addon. Their X
-        // coordinates are stronger evidence for the left card than guessing
-        // which NumberArray slot changed during the challenge transition.
-        var visibleValues = candidates
-            .Where(candidate => candidate.Value is >= 1 and <= 9)
-            .Distinct()
-            .OrderBy(candidate => candidate.X)
-            .ToArray();
-        if (visibleValues.Length > 0)
-            return visibleValues[0].Value;
+        return false;
+    }
 
-        return 0;
+    // Reads the card face from the same object field as AutoTreasureMaps.
+    // The card mask is 1 << (value + 3); 0x4 is the face-down state.
+    private unsafe int? TryReadDoorSelectionGreedTrapCardFace(bool left, out ushort raw)
+    {
+        raw = 0;
+        var high = objectTable
+            .Where(gameObject => gameObject.ObjectKind == Dalamud.Game.ClientState.Objects.Enums.ObjectKind.EventObj &&
+                gameObject.BaseId is >= DoorSelectionGreedTrapFirstChoiceBaseId and <= DoorSelectionGreedTrapLastChoiceBaseId &&
+                (gameObject.BaseId & 1u) == 0)
+            .OrderBy(gameObject => System.Numerics.Vector3.DistanceSquared(
+                objectTable.LocalPlayer?.Position ?? gameObject.Position, gameObject.Position))
+            .FirstOrDefault();
+        var low = objectTable
+            .Where(gameObject => gameObject.ObjectKind == Dalamud.Game.ClientState.Objects.Enums.ObjectKind.EventObj &&
+                gameObject.BaseId is >= DoorSelectionGreedTrapFirstChoiceBaseId and <= DoorSelectionGreedTrapLastChoiceBaseId &&
+                (gameObject.BaseId & 1u) != 0)
+            .OrderBy(gameObject => System.Numerics.Vector3.DistanceSquared(
+                objectTable.LocalPlayer?.Position ?? gameObject.Position, gameObject.Position))
+            .FirstOrDefault();
+
+        if (high == null || low == null)
+            return null;
+
+        var middle = (high.Position + low.Position) / 2f;
+        var towardRight = low.Position - high.Position;
+        if (towardRight.LengthSquared() < float.Epsilon)
+            return null;
+
+        towardRight = System.Numerics.Vector3.Normalize(towardRight);
+        foreach (var candidate in objectTable)
+        {
+            if (candidate.ObjectKind != Dalamud.Game.ClientState.Objects.Enums.ObjectKind.EventObj ||
+                candidate.BaseId != DoorSelectionGreedTrapCardBaseId ||
+                candidate.Address == 0 ||
+                System.Numerics.Vector3.Distance(middle, candidate.Position) > DoorSelectionGreedTrapCardMeters)
+            {
+                continue;
+            }
+
+            var along = System.Numerics.Vector3.Dot(candidate.Position - middle, towardRight);
+            if (left ? along > -DoorSelectionGreedTrapCardSideMeters : along < DoorSelectionGreedTrapCardSideMeters)
+                continue;
+
+            raw = *(ushort*)((byte*)candidate.Address + DoorSelectionGreedTrapCardFaceOffset);
+            if (raw == 0 || (raw & (raw - 1)) != 0)
+                return null;
+
+            var value = System.Numerics.BitOperations.TrailingZeroCount((uint)raw) -
+                        DoorSelectionGreedTrapCardFaceShift;
+            return value is >= 1 and <= 9 ? value : null;
+        }
+
+        return null;
+    }
+
+    private readonly record struct DoorSelectionCardImageCandidate(
+        uint NodeId,
+        float X,
+        float Y,
+        float Width,
+        float Height,
+        ushort PartId,
+        uint PartsId,
+        uint PartCount,
+        ushort U,
+        ushort V,
+        ushort PartWidth,
+        ushort PartHeight)
+    {
+        public int XBand => (int)MathF.Round(X / 24f);
+    }
+
+    private static unsafe void CollectDoorSelectionCardImageCandidates(
+        AtkResNode* node,
+        List<DoorSelectionCardImageCandidate> candidates,
+        HashSet<nint> visited)
+    {
+        if (node == null || !visited.Add((nint)node))
+            return;
+
+        if (node->Type == NodeType.Image)
+        {
+            var image = (AtkImageNode*)node;
+            var parts = image->PartsList;
+            var width = image->Width;
+            var height = image->Height;
+            if (parts != null &&
+                parts->Parts != null &&
+                parts->PartCount is >= 10 and <= 64 &&
+                width >= 40f && height >= 70f &&
+                height >= width * 1.15f &&
+                image->PartId < parts->PartCount)
+            {
+                var part = parts->Parts[image->PartId];
+                var x = 0f;
+                var y = 0f;
+                for (var current = node; current != null; current = current->ParentNode)
+                {
+                    x += current->X;
+                    y += current->Y;
+                }
+
+                candidates.Add(new DoorSelectionCardImageCandidate(
+                    image->NodeId,
+                    x,
+                    y,
+                    width,
+                    height,
+                    image->PartId,
+                    parts->Id,
+                    parts->PartCount,
+                    part.U,
+                    part.V,
+                    part.Width,
+                    part.Height));
+            }
+        }
+
+        CollectDoorSelectionCardImageCandidates(node->ChildNode, candidates, visited);
+        CollectDoorSelectionCardImageCandidates(node->NextSiblingNode, candidates, visited);
+    }
+
+    private static bool TryMapDoorSelectionCardPart(
+        DoorSelectionCardImageCandidate candidate,
+        out int value)
+    {
+        // In TreasureHighLow's card parts list, part 0 is the blue card back
+        // and parts 1..9 are the nine face values.  Ignore the back and any
+        // unrelated image list rather than guessing from a HUD number.
+        value = candidate.PartId is >= 1 and <= 9 ? candidate.PartId : 0;
+        return value != 0;
     }
 
     private static unsafe int[] ReadDoorSelectionHighLowNumberArray()
@@ -8293,6 +9156,41 @@ public sealed class Plugin : IDalamudPlugin
             ReadDoorSelectionHighLowNumberArray());
         return $"卡牌文本候选={textValues}；AtkValues={string.Join(",", atkValues)}；" +
                $"挑战后数组变化候选={string.Join(",", changedValues)}";
+    }
+
+    private static unsafe string DescribeDoorSelectionCardImageCandidates(AtkUnitBase* addon)
+    {
+        if (addon == null)
+            return "card image candidates=unavailable";
+
+        var candidates = new List<DoorSelectionCardImageCandidate>();
+        var visited = new HashSet<nint>();
+        CollectDoorSelectionCardImageCandidates(addon->UldManager.RootNode, candidates, visited);
+        for (var index = 0;
+             addon->UldManager.NodeList != null && index < addon->UldManager.NodeListCount;
+             index++)
+        {
+            CollectDoorSelectionCardImageCandidates(addon->UldManager.NodeList[index], candidates, visited);
+        }
+
+        if (candidates.Count == 0)
+            return "card image candidates=none";
+
+        var details = candidates
+            .OrderBy(candidate => candidate.X)
+            .ThenBy(candidate => candidate.Y)
+            .Take(12)
+            .Select(candidate =>
+            {
+                var mapped = TryMapDoorSelectionCardPart(candidate, out var value)
+                    ? value.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    : "back/unknown";
+                return $"node{candidate.NodeId}@{candidate.X:0},{candidate.Y:0}" +
+                       $" part={candidate.PartId}=>{mapped}" +
+                       $" parts={candidate.PartsId}/{candidate.PartCount}" +
+                       $" uv={candidate.U},{candidate.V},{candidate.PartWidth}x{candidate.PartHeight}";
+            });
+        return $"card image candidates={candidates.Count}[{string.Join(";", details)}]";
     }
 
     private static unsafe string DescribeDoorSelectionImageNodeDetails(AtkUnitBase* addon)
@@ -8653,6 +9551,12 @@ public sealed class Plugin : IDalamudPlugin
         rouletteInteractedEntities.Clear();
         rouletteInteractedChestEntities.Clear();
         rouletteChestDisappearDeadline = default;
+
+        // Do not carry roulette lure rounds into the next map or a later
+        // door-selection duty.  Reset after clearing roulette ownership so
+        // any delayed log/UI callbacks cannot reuse this run's state.
+        ResetDoorSelectionGreedTrapState();
+
         DisableAeAssistPull();
 
         if (shouldResumeAutoHunt)

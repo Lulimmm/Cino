@@ -23,6 +23,14 @@ public sealed class PluginConfiguration : IPluginConfiguration
     public DoorSelectionChoice DoorSelectionFloor3To4 { get; set; } = DoorSelectionChoice.Left;
     public DoorSelectionChoice DoorSelectionFloor4To5 { get; set; } = DoorSelectionChoice.Left;
 
+    // Matches AutoTreasureMaps' Gambler's Lure policy.  AskMe is the source
+    // project's safe default: the player decides whether to challenge the
+    // lure and which side to guess.
+    public DoorSelectionGreedTrapPolicy DoorSelectionGreedTrapPolicy { get; set; } = DoorSelectionGreedTrapPolicy.AskMe;
+
+    // Native Need/Greed roll policy for items shown by a treasure coffer.
+    public LootRoll LootRoll { get; set; } = LootRoll.Need;
+
     public TreasureHuntLogicMode LogicMode { get; set; } = TreasureHuntLogicMode.Head;
 
     public float OtherPluginTestX { get; set; }
@@ -67,4 +75,19 @@ public enum DoorSelectionChoice
 {
     Left,
     Right,
+}
+
+public enum DoorSelectionGreedTrapPolicy : byte
+{
+    AskMe,
+    OpenCoffer,
+    Auto,
+}
+
+public enum LootRoll : byte
+{
+    Need,
+    Greed,
+    Pass,
+    Manual,
 }
