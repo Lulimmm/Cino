@@ -7606,7 +7606,13 @@ public sealed class Plugin : IDalamudPlugin
         // AskMe deliberately leaves both the lure window and the high/low
         // objects to the player, while still making the dungeon state machine
         // modal so it cannot walk away from the coffer.
-        if (policy == DoorSelectionGreedTrapPolicy.AskMe)
+        // A manual high/low choice enters the same confirmation state as an
+        // automated choice. Keep the modal state machine running until that
+        // confirmation and its result have been handled.
+        if (policy == DoorSelectionGreedTrapPolicy.AskMe &&
+            !doorSelectionGreedTrapConfirmationPending &&
+            !doorSelectionGreedTrapOutcomePending &&
+            !doorSelectionGreedTrapAwaitingChoiceClear)
         {
             if (lureOpen || guessPending)
             {
@@ -7765,7 +7771,21 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             var promptText = ReadAddonText((AtkUnitBase*)confirmation);
-            if (!IsDoorSelectionGreedTrapConfirmationPrompt(promptText))
+            var isGreedTrapPrompt = IsDoorSelectionGreedTrapConfirmationPrompt(promptText);
+            // The pending flag is created only after a successful interaction
+            // with one of the lure's large/small objects. Some client builds
+            // expose a generic or temporarily empty SelectYesno label, so a
+            // newly-created prompt is still the lure confirmation when no
+            // unrelated prompt was visible before the interaction.
+            if (!isGreedTrapPrompt &&
+                !doorSelectionGreedTrapPromptWasVisibleBeforeInteraction &&
+                doorSelectionGreedTrapInteractionIssuedAt != default &&
+                now - doorSelectionGreedTrapInteractionIssuedAt <= DoorSelectionGreedTrapAnswerWait)
+            {
+                isGreedTrapPrompt = true;
+            }
+
+            if (!isGreedTrapPrompt)
             {
                 if (now < doorSelectionGreedTrapConfirmationDeadline)
                 {
@@ -8264,7 +8284,18 @@ public sealed class Plugin : IDalamudPlugin
                           normalized.Contains("low", StringComparison.Ordinal) ||
                           normalized.Contains("large", StringComparison.Ordinal) &&
                           normalized.Contains("small", StringComparison.Ordinal);
-        return pairedSides || lure && action;
+        var confirmation = normalized.Contains("confirm", StringComparison.Ordinal) ||
+                           normalized.Contains("confirmation", StringComparison.Ordinal) ||
+                           normalized.Contains("确认", StringComparison.Ordinal) ||
+                           normalized.Contains("确定", StringComparison.Ordinal) ||
+                           normalized.Contains("是否", StringComparison.Ordinal);
+        var side = normalized.Contains("high", StringComparison.Ordinal) ||
+                   normalized.Contains("low", StringComparison.Ordinal) ||
+                   normalized.Contains("large", StringComparison.Ordinal) ||
+                   normalized.Contains("small", StringComparison.Ordinal) ||
+                   normalized.Contains("大", StringComparison.Ordinal) ||
+                   normalized.Contains("小", StringComparison.Ordinal);
+        return pairedSides || lure && action || confirmation && side;
     }
 
     private static unsafe string DescribeDoorSelectionGreedChallengeButton(AtkUnitBase* addon)
@@ -8318,21 +8349,42 @@ public sealed class Plugin : IDalamudPlugin
 
     private void TrackDoorSelectionGreedTrapGuessCompletion(bool guessPending)
     {
+        var manualGuessCompleted =
+            doorSelectionGreedTrapGuessWasPending &&
+            !guessPending &&
+            !doorSelectionGreedTrapConfirmationPending &&
+            !doorSelectionGreedTrapOutcomePending &&
+            !doorSelectionGreedTrapAwaitingChoiceClear &&
+            !doorSelectionGreedTrapChallengeAccepted &&
+            !doorSelectionGreedTrapOpenCofferPending &&
+            !doorSelectionGreedTrapFinished;
+
         // After the source's unreadable-card coin toss, a later manual guess
         // turns automatic challenges back on.  The transition is observable
         // without guessing at ownership: our own guess always leaves one of
         // the confirmation/outcome/choice-clear guards set, while a player
         // guess does not.
-        if (doorSelectionGreedTrapLureUnattended &&
-            doorSelectionGreedTrapGuessWasPending && !guessPending &&
-            !doorSelectionGreedTrapConfirmationPending &&
-            !doorSelectionGreedTrapOutcomePending &&
-            !doorSelectionGreedTrapAwaitingChoiceClear &&
-            !doorSelectionGreedTrapChallengeAccepted)
+        if (doorSelectionGreedTrapLureUnattended && manualGuessCompleted)
         {
             doorSelectionGreedTrapLureUnattended = false;
             doorSelectionGreedTrapLastResultWasTie = false;
             AutoTreasureHuntStatus = "选门：检测到玩家已手动猜牌，恢复后续强欲自动挑战。";
+        }
+
+        if (manualGuessCompleted && doorSelectionGreedTrapActive)
+        {
+            // AskMe does not know which side the player will choose, but the
+            // disappearance of the targetable objects is an unambiguous
+            // signal that a side was clicked. Start the same confirmation
+            // watchdog used by the automatic path and let it retry until the
+            // SelectYesno page appears.
+            var now = DateTime.UtcNow;
+            doorSelectionGreedTrapConfirmationPending = true;
+            doorSelectionGreedTrapConfirmationDeadline = now.Add(DoorSelectionGreedTrapAnswerWait);
+            doorSelectionGreedTrapInteractionIssuedAt = now;
+            doorSelectionGreedTrapPromptWasVisibleBeforeInteraction = false;
+            doorSelectionGreedTrapPromptHiddenAt = now;
+            doorSelectionGreedTrapLastSeenAt = now;
         }
 
         doorSelectionGreedTrapGuessWasPending = guessPending;
