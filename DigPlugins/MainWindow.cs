@@ -55,7 +55,9 @@ public sealed class MainWindow
         Automation,
         Credential,
         Diagnostics,
+        SoloTreeCapture,
         DeepDungeon,
+        GoldSaucer,
     }
 
     private readonly Plugin plugin;
@@ -115,6 +117,7 @@ public sealed class MainWindow
     private bool isOpen;
     private string credentialInput = string.Empty;
     private string credentialStatus = string.Empty;
+    private string soloTreeSwingTestStatus = string.Empty;
     private bool credentialValidationInProgress;
     private string navigationBaseIdInput = "2013860";
     private string mapSupplementMaxUnitPriceInput = string.Empty;
@@ -2496,7 +2499,9 @@ public sealed class MainWindow
         DrawNavigationButton("自动挖宝", string.Empty, MainPage.Automation, canOpenAutomation);
         DrawNavigationButton("凭证验证", string.Empty, MainPage.Credential, !canOpenAutomation);
         DrawNavigationButton("测试面板", string.Empty, MainPage.Diagnostics, plugin.HasDeveloperCredential);
+        DrawNavigationButton("孤树无援抓包", string.Empty, MainPage.SoloTreeCapture, plugin.HasDeveloperCredential);
         DrawNavigationButton("IC 死宫", string.Empty, MainPage.DeepDungeon, true);
+        DrawNavigationButton("金蝶", string.Empty, MainPage.GoldSaucer, true);
 
         ImGui.Spacing();
         DrawSidebarStatus("vnavmesh", plugin.IsVnavmeshRunning);
@@ -2528,6 +2533,8 @@ public sealed class MainWindow
         if (page == MainPage.Automation && !plugin.IsCredentialValidated)
             return;
         if (page == MainPage.Diagnostics && !plugin.HasDeveloperCredential)
+            return;
+        if (page == MainPage.SoloTreeCapture && !plugin.HasDeveloperCredential)
             return;
         if (page == MainPage.Credential && plugin.IsCredentialValidated)
             return;
@@ -2748,7 +2755,7 @@ public sealed class MainWindow
     {
         if (!plugin.IsCredentialValidated && activePage is not (MainPage.Credential or MainPage.DeepDungeon))
             activePage = MainPage.Credential;
-        else if (activePage == MainPage.Diagnostics && !plugin.HasDeveloperCredential)
+        else if ((activePage is MainPage.Diagnostics or MainPage.SoloTreeCapture) && !plugin.HasDeveloperCredential)
             activePage = MainPage.Automation;
         else if (plugin.IsCredentialValidated && activePage == MainPage.Credential)
             activePage = MainPage.Automation;
@@ -2761,8 +2768,14 @@ public sealed class MainWindow
             case MainPage.Diagnostics:
                 DrawTestPage();
                 break;
+            case MainPage.SoloTreeCapture:
+                DrawSoloTreeCapturePage();
+                break;
             case MainPage.DeepDungeon:
                 DrawDeepDungeonPage();
+                break;
+            case MainPage.GoldSaucer:
+                DrawGoldSaucerPage();
                 break;
             default:
                 DrawAutoTreasureHuntPage();
@@ -3157,9 +3170,177 @@ public sealed class MainWindow
             plugin.SetDeepDungeonSpeedSettings(speedEnabled, speedAddition, maxAcceleration);
     }
 
+    private void DrawGoldSaucerPage()
+    {
+        DrawPageHeading("GOLD SAUCER", "金蝶", "小游戏自动化控制");
+        DrawIdentityStrip("OUT ON A LIMB", "自动开始、挥砍、翻倍并循环结算孤树无援");
+        ImGui.Spacing();
+
+        var enabled = plugin.SoloTreeAutomationEnabled;
+        if (DrawAemeathToggle("SoloTreeAutomation", "自动孤树无援", ref enabled, plugin.IsCredentialValidated))
+            plugin.SetSoloTreeAutomationEnabled(enabled);
+
+        ImGui.TextColored(
+            plugin.SoloTreeAutomationEnabled ? AemeathTextCyan : AemeathMuted,
+            plugin.SoloTreeAutomationEnabled ? "运行中" : "未启动");
+        ImGui.SameLine();
+        ImGui.TextWrapped(plugin.SoloTreeAutomationStatus);
+        ImGui.TextDisabled("靠近设施后开启；事件内直接发包，允许翻倍时继续砍树，结算后自动开始下一轮，关闭开关才停止。");
+    }
+
+    private void DrawSoloTreeCapturePage()
+    {
+        var capture = plugin.SoloTreePacketCapture;
+        DrawPageHeading("EVENT TRACE", "孤树无援抓包", string.Empty);
+        ImGui.TextColored(capture.IsCapturing ? AemeathTextCyan : AemeathTextPink,
+            capture.IsCapturing ? "捕获中" : "已停止");
+        ImGui.SameLine();
+        ImGui.TextDisabled($"{capture.Count} / 500");
+
+        if (!capture.IsCapturing)
+        {
+            if (DrawAemeathButton("SoloTreeCaptureStart", "开始捕获", new Vector2(132f, 30f),
+                    plugin.HasDeveloperCredential && capture.IsAvailable, true))
+                capture.Start();
+        }
+        else if (DrawAemeathButton("SoloTreeCaptureStop", "停止捕获", new Vector2(132f, 30f), true, true))
+        {
+            capture.Stop();
+        }
+
+        ImGui.SameLine();
+        if (DrawAemeathButton("SoloTreeCaptureClear", "清空记录", new Vector2(120f, 30f),
+                plugin.HasDeveloperCredential && !capture.IsCapturing))
+            capture.Clear();
+        ImGui.SameLine();
+        if (DrawAemeathButton("SoloTreeCaptureCopy", "复制 JSON", new Vector2(120f, 30f),
+                plugin.HasDeveloperCredential && capture.Count > 0))
+            ImGui.SetClipboardText(capture.ExportJson());
+
+        ImGui.SameLine();
+        if (DrawAemeathButton("SoloTreeCaptureWindows", "抓取当前窗口", new Vector2(145f, 30f),
+                plugin.HasDeveloperCredential))
+            capture.CaptureOpenWindows();
+
+        ImGui.SameLine();
+        if (DrawAemeathButton("SoloTreeCaptureWindowsCopy", "复制窗口 JSON", new Vector2(145f, 30f),
+                plugin.HasDeveloperCredential && capture.OpenWindowsSnapshot().Count > 0))
+            ImGui.SetClipboardText(capture.ExportOpenWindowsJson());
+
+        ImGui.TextWrapped(capture.HookStatus);
+        var openWindows = capture.OpenWindowsSnapshot();
+        if (openWindows.Count > 0)
+        {
+            var capturedAt = capture.OpenWindowsCapturedAt.ToLocalTime().ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture);
+            ImGui.TextDisabled($"当前窗口快照：{openWindows.Count} 个，{capturedAt}");
+            if (ImGui.BeginTable("SoloTreeOpenWindows", 6,
+                    ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollX | ImGuiTableFlags.ScrollY,
+                    new Vector2(0, 250)))
+            {
+                ImGui.TableSetupColumn("序号", ImGuiTableColumnFlags.WidthFixed, 48);
+                ImGui.TableSetupColumn("Addon", ImGuiTableColumnFlags.WidthFixed, 170);
+                ImGui.TableSetupColumn("状态", ImGuiTableColumnFlags.WidthFixed, 150);
+                ImGui.TableSetupColumn("Id", ImGuiTableColumnFlags.WidthFixed, 90);
+                ImGui.TableSetupColumn("阻塞层级", ImGuiTableColumnFlags.WidthFixed, 80);
+                ImGui.TableSetupColumn("窗口文本", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableHeadersRow();
+
+                foreach (var window in openWindows)
+                {
+                    ImGui.TableNextRow();
+                    ImGui.TableSetColumnIndex(0);
+                    ImGui.TextUnformatted(window.LoadIndex.ToString(CultureInfo.InvariantCulture));
+                    ImGui.TableSetColumnIndex(1);
+                    ImGui.TextUnformatted(string.IsNullOrWhiteSpace(window.Name) ? "<无名>" : window.Name);
+                    ImGui.TableSetColumnIndex(2);
+                    ImGui.TextUnformatted($"就绪={window.IsReady} 可见={window.IsVisible}");
+                    ImGui.TableSetColumnIndex(3);
+                    ImGui.TextUnformatted(window.Id.ToString(CultureInfo.InvariantCulture));
+                    ImGui.TableSetColumnIndex(4);
+                    ImGui.TextUnformatted(window.BlockingAddonCount.ToString(CultureInfo.InvariantCulture));
+                    ImGui.TableSetColumnIndex(5);
+                    ImGui.TextWrapped(window.Text);
+                }
+
+                ImGui.EndTable();
+            }
+        }
+
+        ImGui.Separator();
+
+        if (!capture.IsAvailable)
+        {
+            ImGui.TextWrapped("当前客户端版本没有可用的事件捕获 Hook。");
+        }
+
+        var packets = capture.Snapshot();
+        if (packets.Count == 0)
+        {
+            ImGui.TextWrapped("开始捕获后再进入孤树无援流程；也可以先抓取当前窗口定位确认框。");
+            return;
+        }
+
+        if (!ImGui.BeginTable("SoloTreeCapturedPackets", 8,
+                ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollX | ImGuiTableFlags.ScrollY,
+                new Vector2(0, 390)))
+            return;
+
+        ImGui.TableSetupColumn("#", ImGuiTableColumnFlags.WidthFixed, 48);
+        ImGui.TableSetupColumn("时间", ImGuiTableColumnFlags.WidthFixed, 92);
+        ImGui.TableSetupColumn("方向", ImGuiTableColumnFlags.WidthFixed, 105);
+        ImGui.TableSetupColumn("事件", ImGuiTableColumnFlags.WidthFixed, 130);
+        ImGui.TableSetupColumn("Event ID", ImGuiTableColumnFlags.WidthFixed, 102);
+        ImGui.TableSetupColumn("Scene", ImGuiTableColumnFlags.WidthFixed, 54);
+        ImGui.TableSetupColumn("对象 / 标志", ImGuiTableColumnFlags.WidthFixed, 150);
+        ImGui.TableSetupColumn("参数", ImGuiTableColumnFlags.WidthStretch);
+        ImGui.TableHeadersRow();
+
+        foreach (var packet in packets.Reverse())
+        {
+            ImGui.TableNextRow();
+            ImGui.TableSetColumnIndex(0);
+            ImGui.TextUnformatted(packet.Sequence.ToString(CultureInfo.InvariantCulture));
+            ImGui.TableSetColumnIndex(1);
+            ImGui.TextUnformatted(packet.CapturedAt.ToLocalTime().ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture));
+            ImGui.TableSetColumnIndex(2);
+            ImGui.TextUnformatted(packet.Direction);
+            ImGui.TableSetColumnIndex(3);
+            ImGui.TextUnformatted(packet.Kind);
+            ImGui.TableSetColumnIndex(4);
+            ImGui.TextUnformatted(packet.PacketLabel);
+            ImGui.TableSetColumnIndex(5);
+            ImGui.TextUnformatted(packet.Scene.ToString(CultureInfo.InvariantCulture));
+            ImGui.TableSetColumnIndex(6);
+            ImGui.TextUnformatted(packet.ObjectAndFlags);
+            ImGui.TableSetColumnIndex(7);
+            ImGui.TextWrapped(packet.DataText);
+        }
+
+        ImGui.EndTable();
+    }
+
     private void DrawTestPage()
     {
         DrawPageHeading("DEVELOPER CONSOLE", "测试面板", "诊断 VFX、BaseID、门消息与传送流程");
+        ImGui.TextColored(AemeathTextPink, "孤树无援发包测试");
+        if (DrawAemeathButton("TestSoloTreeSwingPacket", "单独发送挥斧包", new Vector2(160f, 30f),
+                plugin.CanTestSoloTreeSwingPacket, true))
+        {
+            soloTreeSwingTestStatus = plugin.TrySendSoloTreeSwingPacketForTest(out var error)
+                ? string.Empty
+                : error;
+        }
+        var swingTestStatus = !string.IsNullOrEmpty(soloTreeSwingTestStatus)
+            ? soloTreeSwingTestStatus
+            : plugin.SoloTreeSwingPacketTestStatus;
+        if (!string.IsNullOrEmpty(swingTestStatus))
+        {
+            ImGui.SameLine();
+            ImGui.TextWrapped(swingTestStatus);
+        }
+        ImGui.TextDisabled("仅限开发者凭证；须处于孤树无援事件中，且自动流程已关闭。");
+
+        ImGui.Separator();
         ImGui.TextColored(AemeathTextPink, "动画锁测试");
         var animationLockEnabled = plugin.AnimationLockOverrideEnabled;
         var animationLockMilliseconds = plugin.AnimationLockOverrideMilliseconds;

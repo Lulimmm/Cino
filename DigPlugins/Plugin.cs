@@ -30,6 +30,7 @@ using GameUtf8String = FFXIVClientStructs.FFXIV.Client.System.String.Utf8String;
 using LuminaAetheryte = Lumina.Excel.Sheets.Aetheryte;
 using LuminaMap = Lumina.Excel.Sheets.Map;
 using LuminaMapMarker = Lumina.Excel.Sheets.MapMarker;
+using AutoTreasureHunt.PacketStructures;
 
 namespace AutoTreasureHunt;
 
@@ -213,6 +214,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly DoorSelectionAnimationSkipController doorSelectionAnimationSkipController;
     private readonly DeepDungeonMovementController deepDungeonMovementController;
     private readonly DeepDungeonSpeedController deepDungeonSpeedController;
+    private readonly SoloTreePacketCapture soloTreePacketCapture;
+    private readonly SoloTreeAutomationController soloTreeAutomationController;
     private CredentialRole sessionCredentialRole;
     private bool validationServerCheckInProgress;
     private DateTime validationServerLastCheckedAt;
@@ -652,6 +655,17 @@ public sealed class Plugin : IDalamudPlugin
             () => configuration.DeepDungeonSpeedAddition,
             () => configuration.DeepDungeonMaxAcceleration);
 
+        soloTreePacketCapture = new SoloTreePacketCapture(
+            interop,
+            log,
+            () => HasDeveloperCredential,
+            () => IsCredentialValidated);
+        soloTreeAutomationController = new SoloTreeAutomationController(
+            soloTreePacketCapture,
+            objectTable,
+            log,
+            () => IsCredentialValidated);
+
         coordinateApplier = new CoordinateApplier(objectTable, SaveConfiguration);
         openMarketAnywhere = new OpenMarketAnywhere(framework, gameGui, log, interop, marketBoard, dataManager, textureProvider);
         globetrotterTreasureMapCore = new GlobetrotterTreasureMapCore(
@@ -794,6 +808,31 @@ public sealed class Plugin : IDalamudPlugin
     public bool IsCredentialValidated => sessionCredentialRole != CredentialRole.None;
 
     public bool HasDeveloperCredential => sessionCredentialRole == CredentialRole.Developer;
+
+    internal SoloTreePacketCapture SoloTreePacketCapture => soloTreePacketCapture;
+
+    public bool SoloTreeAutomationEnabled => soloTreeAutomationController.Enabled;
+
+    public string SoloTreeAutomationStatus => soloTreeAutomationController.Status;
+
+    public bool CanTestSoloTreeSwingPacket =>
+        HasDeveloperCredential &&
+        !soloTreeAutomationController.Enabled &&
+        (soloTreePacketCapture.IsSoloTreeEventActive ||
+         objectTable.Any(gameObject => gameObject.BaseId == 197371) &&
+         soloTreePacketCapture.IsSoloTreeMiniGameVisible);
+
+    public bool TrySendSoloTreeSwingPacketForTest(out string error) =>
+        soloTreePacketCapture.TrySendCapturedSoloTreeSwingPacketForTest(
+            objectTable.Any(gameObject => gameObject.BaseId == 197371),
+            out error);
+
+    public string SoloTreeSwingPacketTestStatus => soloTreePacketCapture.TestSwingPacketStatus;
+
+    public void SetSoloTreeAutomationEnabled(bool enabled)
+    {
+        soloTreeAutomationController.SetEnabled(enabled);
+    }
 
     public bool HasAdvancedCommandCredential =>
         sessionCredentialRole is CredentialRole.Advanced or CredentialRole.Developer;
@@ -1186,6 +1225,8 @@ public sealed class Plugin : IDalamudPlugin
         chatGui.LogMessage -= OnLogMessage;
         openMarketAnywhere.Dispose();
         animationLockController.Dispose();
+        soloTreeAutomationController.Dispose();
+        soloTreePacketCapture.Dispose();
         doorSelectionAnimationSkipController.Dispose();
         deepDungeonMovementController.Dispose();
         deepDungeonSpeedController.Dispose();
@@ -1460,6 +1501,8 @@ public sealed class Plugin : IDalamudPlugin
     {
         IsAutoTreasureHuntEnabled = false;
         UnloadOptimizedInteraction();
+        soloTreeAutomationController.SetEnabled(false);
+        soloTreePacketCapture.Stop();
         sessionCredentialRole = CredentialRole.None;
     }
 
@@ -2654,6 +2697,7 @@ public sealed class Plugin : IDalamudPlugin
     public unsafe void EmergencyStop()
     {
         emergencyStopActive = true;
+        soloTreeAutomationController.SetEnabled(false);
         manualTestModeActive = false;
         interactableObjectEchoGeneration++;
         interactableObjectEchoQueue.Clear();
@@ -4500,6 +4544,8 @@ public sealed class Plugin : IDalamudPlugin
 
     private unsafe void OnFrameworkUpdate(IFramework framework)
     {
+        soloTreePacketCapture.UpdateAuthorization();
+        soloTreeAutomationController.Update();
         openMarketAnywhere.Update();
 
         TrackWheelMapChange();
@@ -8800,7 +8846,7 @@ public sealed class Plugin : IDalamudPlugin
                normalized.Contains("gambler'slureisset", StringComparison.Ordinal);
     }
 
-    private static unsafe string ReadAddonName(AtkUnitBase* addon)
+    internal static unsafe string ReadAddonName(AtkUnitBase* addon)
     {
         if (addon == null)
             return string.Empty;
@@ -8878,7 +8924,7 @@ public sealed class Plugin : IDalamudPlugin
         doorSelectionGreedTrapLastLureEventId = logMessageId;
     }
 
-    private static unsafe string ReadAddonText(AtkUnitBase* addon)
+    internal static unsafe string ReadAddonText(AtkUnitBase* addon)
     {
         if (addon == null)
             return string.Empty;
