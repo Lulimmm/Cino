@@ -14,7 +14,7 @@ internal sealed unsafe class SoloTreeAutomationController : IDisposable
     private const int MaximumSwingActions = 30;
     private static readonly TimeSpan ActionDelay = TimeSpan.FromMilliseconds(150);
     private static readonly TimeSpan ResponseTimeout = TimeSpan.FromSeconds(10);
-    private static readonly TimeSpan CashOutWait = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan CashOutWait = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan SettlementTimeout = TimeSpan.FromSeconds(30);
 
     private enum AutomationStage
@@ -105,7 +105,7 @@ internal sealed unsafe class SoloTreeAutomationController : IDisposable
         {
             var balanceInventory = InventoryManager.Instance();
             if (balanceInventory != null &&
-                (long)balanceInventory->GetInventoryItemCount(29) - balanceBeforeSettlement >= reward)
+                (long)balanceInventory->GetGoldSaucerCoin() - balanceBeforeSettlement >= reward)
             {
                 var settledReward = reward;
                 completedFullRewardRounds++;
@@ -134,7 +134,7 @@ internal sealed unsafe class SoloTreeAutomationController : IDisposable
         {
             var inventory = InventoryManager.Instance();
             if (inventory != null &&
-                (long)inventory->GetInventoryItemCount(29) - balanceBeforeSettlement >= reward)
+                (long)inventory->GetGoldSaucerCoin() - balanceBeforeSettlement >= reward)
             {
                 QueueAction(AutomationStage.SendComplete, "已检测到金碟币到账，准备结束事件");
                 return;
@@ -170,7 +170,7 @@ internal sealed unsafe class SoloTreeAutomationController : IDisposable
         {
             var inventory = InventoryManager.Instance();
             if (inventory == null) { Recover("暂时无法读取金碟币余额"); return; }
-            balanceBeforeSettlement = inventory->GetInventoryItemCount(29);
+            balanceBeforeSettlement = unchecked((int)inventory->GetGoldSaucerCoin());
             stage = AutomationStage.WaitForCashOut;
             lastProgressAt = now;
             if (!capture.TrySendEventAction(SoloTreeEventId, SoloTreeScene, 8, null, out var cashOutError))
